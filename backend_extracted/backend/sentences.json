@@ -1,0 +1,650 @@
+[
+  {
+    "id": 1,
+    "text": "The weather is beautiful today",
+    "translation": "今天天气真好",
+    "difficulty": "easy",
+    "category": "daily",
+    "tags": ["weather", "daily-life"],
+    "key_phrases": [
+      {"phrase": "beautiful today", "meaning": "今天很美", "note": "描述天气好的常用搭配"}
+    ],
+    "cultural_note": "英语母语者常用天气话题作为寒暄开场白，这被称为 'weather talk' 文化。"
+  },
+  {
+    "id": 2,
+    "text": "I would like a cup of coffee please",
+    "translation": "我想要一杯咖啡，谢谢",
+    "difficulty": "easy",
+    "category": "ordering",
+    "tags": ["food", "polite"],
+    "key_phrases": [
+      {"phrase": "I would like", "meaning": "我想要（礼貌表达）", "note": "比 'I want' 更礼貌，常用于点餐或请求"},
+      {"phrase": "a cup of coffee", "meaning": "一杯咖啡", "note": "量词搭配：a cup of + 饮品"}
+    ],
+    "cultural_note": "'I would like' 是英语中最常用的礼貌请求句式，缩写形式 'I'd like' 在口语中更常见。"
+  },
+  {
+    "id": 3,
+    "text": "How are you doing this morning",
+    "translation": "今天早上你好吗",
+    "difficulty": "easy",
+    "category": "greeting",
+    "tags": ["greeting", "daily-life"],
+    "key_phrases": [
+      {"phrase": "How are you doing", "meaning": "你好吗", "note": "比 'How are you' 更口语化、更亲切"},
+      {"phrase": "this morning", "meaning": "今天早上", "note": "this + 时间段 表示'这个...'"}
+    ],
+    "cultural_note": "美式英语中 'How are you doing' 是最常见的问候之一，回答通常用 'I'm doing good/great' 或简单 'Good, you?'"
+  },
+  {
+    "id": 4,
+    "text": "Can you help me find my way",
+    "translation": "你能帮我找到路吗",
+    "difficulty": "easy",
+    "category": "travel",
+    "tags": ["direction", "request"],
+    "key_phrases": [
+      {"phrase": "Can you help me", "meaning": "你能帮我吗", "note": "请求帮助的基本句式"},
+      {"phrase": "find my way", "meaning": "找到路", "note": "way在此处指'路/方向'，常用搭配 find one's way"}
+    ]
+  },
+  {
+    "id": 5,
+    "text": "The children are playing in the garden",
+    "translation": "孩子们正在花园里玩耍",
+    "difficulty": "medium",
+    "category": "daily",
+    "tags": ["daily-life", "present-continuous"]
+  },
+  {
+    "id": 6,
+    "text": "I enjoy reading books in the evening",
+    "translation": "我喜欢在晚上读书",
+    "difficulty": "medium",
+    "category": "hobby",
+    "tags": ["hobby", "habit"]
+  },
+  {
+    "id": 7,
+    "text": "The restaurant serves delicious food",
+    "translation": "这家餐厅供应美味的食物",
+    "difficulty": "medium",
+    "category": "food",
+    "tags": ["food", "description"]
+  },
+  {
+    "id": 8,
+    "text": "We went to the park yesterday",
+    "translation": "我们昨天去了公园",
+    "difficulty": "medium",
+    "category": "daily",
+    "tags": ["past-tense", "daily-life"]
+  },
+  {
+    "id": 9,
+    "text": "Learning English takes time and practice",
+    "translation": "学习英语需要时间和练习",
+    "difficulty": "medium",
+    "category": "education",
+    "tags": ["education", "motivation"]
+  },
+  {
+    "id": 10,
+    "text": "She sells seashells by the seashore",
+    "translation": "她在海边卖贝壳",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "S-SH"]
+  },
+  {
+    "id": 11,
+    "text": "The government should prioritize education and healthcare to ensure sustainable development",
+    "difficulty": "hard",
+    "category": "society"
+  },
+  {
+    "id": 12,
+    "text": "It is evident that climate change has become a fundamental challenge that requires international cooperation",
+    "difficulty": "hard",
+    "category": "environment"
+  },
+  {
+    "id": 13,
+    "text": "The researcher demonstrated that the new mechanism could facilitate significant improvements in energy efficiency",
+    "difficulty": "hard",
+    "category": "academic"
+  },
+  {
+    "id": 14,
+    "text": "Despite considerable opposition the committee decided to implement the controversial policy",
+    "difficulty": "hard",
+    "category": "politics"
+  },
+  {
+    "id": 15,
+    "text": "She was reluctant to acknowledge that her interpretation of the phenomenon was potentially flawed",
+    "difficulty": "hard",
+    "category": "academic"
+  },
+  {
+    "id": 16,
+    "text": "The authentic cuisine of this region incorporates numerous indigenous ingredients that are rarely found elsewhere",
+    "difficulty": "hard",
+    "category": "culture"
+  },
+  {
+    "id": 17,
+    "text": "He anticipated the dilemma but failed to conceive an appropriate remedy before the deadline",
+    "difficulty": "hard",
+    "category": "business"
+  },
+  {
+    "id": 18,
+    "text": "The profound impact of technological advancement on contemporary society cannot be underestimated",
+    "difficulty": "hard",
+    "category": "technology"
+  },
+  {
+    "id": 19,
+    "text": "Students who participate actively in extracurricular activities tend to demonstrate superior problem-solving abilities",
+    "difficulty": "hard",
+    "category": "education"
+  },
+  {
+    "id": 20,
+    "text": "The investigation revealed that the enterprise had deliberately obscured crucial information from the public",
+    "difficulty": "hard",
+    "category": "news"
+  },
+  {
+    "id": 21,
+    "text": "We need to establish a more harmonious relationship between economic growth and environmental preservation",
+    "difficulty": "hard",
+    "category": "environment"
+  },
+  {
+    "id": 22,
+    "text": "The candidate's remarkable determination and intellectual capacity impressed the selection committee",
+    "difficulty": "hard",
+    "category": "career"
+  },
+  {
+    "id": 23,
+    "text": "It is essential to verify the authenticity of information before sharing it on social media platforms",
+    "difficulty": "medium",
+    "category": "technology"
+  },
+  {
+    "id": 24,
+    "text": "The professor emphasized that critical thinking is vital for academic success",
+    "difficulty": "medium",
+    "category": "education"
+  },
+  {
+    "id": 25,
+    "text": "Many adolescents struggle with the transition from childhood to adulthood",
+    "difficulty": "medium",
+    "category": "psychology"
+  },
+  {
+    "id": 26,
+    "text": "The company decided to allocate a substantial budget for research and development",
+    "difficulty": "medium",
+    "category": "business"
+  },
+  {
+    "id": 27,
+    "text": "She pursued her passion for music despite numerous obstacles along the way",
+    "difficulty": "medium",
+    "category": "inspiration"
+  },
+  {
+    "id": 28,
+    "text": "The documentary provides a fascinating perspective on ancient civilizations",
+    "difficulty": "medium",
+    "category": "culture"
+  },
+  {
+    "id": 29,
+    "text": "Effective communication requires both clarity of expression and attentive listening",
+    "difficulty": "medium",
+    "category": "communication"
+  },
+  {
+    "id": 30,
+    "text": "The initiative aims to promote voluntary community service among young people",
+    "difficulty": "medium",
+    "category": "society"
+  },
+  {
+    "id": 31,
+    "text": "We must tackle this problem before it becomes even more threatening to public safety",
+    "difficulty": "medium",
+    "category": "society"
+  },
+  {
+    "id": 32,
+    "text": "Her sudden disappearance remains an obscure mystery that puzzles investigators to this day",
+    "difficulty": "medium",
+    "category": "mystery"
+  },
+  {
+    "id": 33,
+    "text": "The widespread use of smartphones has transformed how people communicate and access information",
+    "difficulty": "medium",
+    "category": "technology"
+  },
+  {
+    "id": 34,
+    "text": "He obtained a scholarship to study abroad which was a tremendous opportunity for his career",
+    "difficulty": "medium",
+    "category": "education"
+  },
+  {
+    "id": 35,
+    "text": "The resort town attracts thousands of tourists every summer with its beautiful beaches and warm hospitality",
+    "difficulty": "medium",
+    "category": "travel"
+  },
+  {
+    "id": 36,
+    "text": "If the circumstances were different I would definitely pursue this opportunity without hesitation",
+    "difficulty": "medium",
+    "category": "daily"
+  },
+  {
+    "id": 37,
+    "text": "The spontaneous applause from the audience indicated their genuine appreciation of the performance",
+    "difficulty": "hard",
+    "category": "culture"
+  },
+  {
+    "id": 38,
+    "text": "Although the scheme appeared promising it ultimately failed to deliver the anticipated results",
+    "difficulty": "hard",
+    "category": "business"
+  },
+  {
+    "id": 39,
+    "text": "The prospect of artificial intelligence replacing human workers has sparked intense controversy worldwide",
+    "difficulty": "hard",
+    "category": "technology"
+  },
+  {
+    "id": 40,
+    "text": "Environmentalists advocate for stricter regulations to prohibit industrial pollution in protected areas",
+    "difficulty": "hard",
+    "category": "environment"
+  },
+  {
+    "id": 41,
+    "text": "The preliminary findings suggest a strong correlation between sleep quality and academic performance",
+    "difficulty": "hard",
+    "category": "academic"
+  },
+  {
+    "id": 42,
+    "text": "She underwent extensive training to prepare for the demanding responsibilities of her new position",
+    "difficulty": "hard",
+    "category": "career"
+  },
+  {
+    "id": 43,
+    "text": "The government imposed new restrictions on imports which provoked disputes with trading partners",
+    "difficulty": "hard",
+    "category": "politics"
+  },
+  {
+    "id": 44,
+    "text": "It is imperative that we diminish our reliance on fossil fuels and transition to renewable energy sources",
+    "difficulty": "hard",
+    "category": "environment"
+  },
+  {
+    "id": 45,
+    "text": "The novel offers an elaborate depiction of life in nineteenth century Victorian England",
+    "difficulty": "hard",
+    "category": "literature"
+  },
+  {
+    "id": 46,
+    "text": "His reputation as a reliable and innovative engineer was well established within the industry",
+    "difficulty": "hard",
+    "category": "career"
+  },
+  {
+    "id": 47,
+    "text": "The conference provided a unique platform for experts from diverse backgrounds to exchange ideas",
+    "difficulty": "medium",
+    "category": "academic"
+  },
+  {
+    "id": 48,
+    "text": "Many traditional crafts are in danger of vanishing as younger generations pursue different careers",
+    "difficulty": "medium",
+    "category": "culture"
+  },
+  {
+    "id": 49,
+    "text": "The witness was obliged to reveal what she had observed during the incident",
+    "difficulty": "medium",
+    "category": "daily"
+  },
+  {
+    "id": 50,
+    "text": "Parents should encourage their children to develop independent thinking rather than merely following conventions",
+    "difficulty": "hard",
+    "category": "education"
+  },
+  {
+    "id": 51,
+    "text": "The institution has made significant progress in promoting diversity and inclusivity on campus",
+    "difficulty": "medium",
+    "category": "education"
+  },
+  {
+    "id": 52,
+    "text": "He could barely conceal his disappointment when he learned that his application had been dismissed",
+    "difficulty": "medium",
+    "category": "daily"
+  },
+  {
+    "id": 53,
+    "text": "The phenomenon of urbanization has brought both opportunities and challenges to modern societies",
+    "difficulty": "hard",
+    "category": "society"
+  },
+  {
+    "id": 54,
+    "text": "She resolved to undertake the challenging project despite the numerous risks involved",
+    "difficulty": "hard",
+    "category": "career"
+  },
+  {
+    "id": 55,
+    "text": "The invention of the internet has revolutionized the way people access and share information globally",
+    "difficulty": "hard",
+    "category": "technology"
+  },
+  {
+    "id": 56,
+    "text": "I genuinely appreciate your willingness to accommodate my schedule at such short notice",
+    "difficulty": "medium",
+    "category": "daily"
+  },
+  {
+    "id": 57,
+    "text": "The earthquake caused enormous damage to the infrastructure of the coastal city",
+    "difficulty": "medium",
+    "category": "news"
+  },
+  {
+    "id": 58,
+    "text": "Workers who are exposed to excessive noise without proper protection may suffer permanent hearing loss",
+    "difficulty": "hard",
+    "category": "health"
+  },
+  {
+    "id": 59,
+    "text": "The new legislation aims to guarantee equal opportunities for all citizens regardless of their background",
+    "difficulty": "hard",
+    "category": "politics"
+  },
+  {
+    "id": 60,
+    "text": "Could you recommend a good restaurant that serves authentic Italian cuisine",
+    "difficulty": "easy",
+    "category": "daily"
+  },
+  {
+    "id": 61,
+    "text": "The exhibition features contemporary artwork from artists across the globe",
+    "difficulty": "medium",
+    "category": "culture"
+  },
+  {
+    "id": 62,
+    "text": "The supervisor instructed the team to proceed with the project according to the revised timeline",
+    "difficulty": "medium",
+    "category": "business"
+  },
+  {
+    "id": 63,
+    "text": "There has been a noticeable tendency among young people to prioritize work life balance over career advancement",
+    "difficulty": "hard",
+    "category": "society"
+  },
+  {
+    "id": 64,
+    "text": "The inspiring speech motivated the graduates to pursue their dreams with passion and perseverance",
+    "difficulty": "medium",
+    "category": "inspiration"
+  },
+  {
+    "id": 65,
+    "text": "They negotiated a compromise that was acceptable to both parties after hours of intense discussion",
+    "difficulty": "hard",
+    "category": "business"
+  },
+  {
+    "id": 66,
+    "text": "The company decided to refine its marketing strategy to better target younger consumers",
+    "difficulty": "medium",
+    "category": "business"
+  },
+  {
+    "id": 67,
+    "text": "Modern technology has made it possible to manufacture products with extraordinary precision and efficiency",
+    "difficulty": "hard",
+    "category": "technology"
+  },
+  {
+    "id": 68,
+    "text": "The debate regarding the ethics of genetic modification continues to divide public opinion",
+    "difficulty": "hard",
+    "category": "science"
+  },
+  {
+    "id": 69,
+    "text": "She has a genuine passion for helping others and frequently volunteers at the local community center",
+    "difficulty": "medium",
+    "category": "daily"
+  },
+  {
+    "id": 70,
+    "text": "The government needs to implement more effective measures to tackle the housing crisis in major cities",
+    "difficulty": "hard",
+    "category": "society"
+  },
+  {
+    "id": 71,
+    "text": "The ability to think critically and solve problems creatively is increasingly valued in the modern workplace",
+    "difficulty": "hard",
+    "category": "career"
+  },
+  {
+    "id": 72,
+    "text": "He was so absorbed in the book that he barely noticed the time passing",
+    "difficulty": "easy",
+    "category": "daily"
+  },
+  {
+    "id": 73,
+    "text": "The agreement specifies that neither party shall disclose confidential information to third parties",
+    "difficulty": "hard",
+    "category": "business"
+  },
+  {
+    "id": 74,
+    "text": "The preservation of cultural heritage requires collective effort and long term commitment",
+    "difficulty": "hard",
+    "category": "culture"
+  },
+  {
+    "id": 75,
+    "text": "Despite the challenges she encountered along the way she never abandoned her determination to succeed",
+    "difficulty": "hard",
+    "category": "inspiration"
+  },
+  {
+    "id": 76,
+    "text": "The book provides a comprehensive analysis of the factors that contributed to the economic crisis",
+    "difficulty": "hard",
+    "category": "academic"
+  },
+  {
+    "id": 77,
+    "text": "Regular exercise and a balanced diet are essential for maintaining good physical and mental health",
+    "difficulty": "medium",
+    "category": "health"
+  },
+  {
+    "id": 78,
+    "text": "The interpreter did an excellent job conveying the nuanced meaning of the original speech",
+    "difficulty": "hard",
+    "category": "communication"
+  },
+  {
+    "id": 79,
+    "text": "Many species are currently facing the threat of extinction due to habitat destruction and climate change",
+    "difficulty": "hard",
+    "category": "environment"
+  },
+  {
+    "id": 80,
+    "text": "The new policy aims to promote sustainable practices in manufacturing and reduce carbon emissions",
+    "difficulty": "hard",
+    "category": "environment"
+  },
+  {
+    "id": 81,
+    "text": "Learning a second language enhances cognitive flexibility and provides a deeper understanding of different cultures",
+    "difficulty": "hard",
+    "category": "education"
+  },
+  {
+    "id": 82,
+    "text": "The rapid pace of urbanization has created both opportunities and challenges for city planners",
+    "difficulty": "hard",
+    "category": "society"
+  },
+  {
+    "id": 83,
+    "text": "She carefully inspected the document to ensure that all the details were accurate before signing it",
+    "difficulty": "medium",
+    "category": "business"
+  },
+  {
+    "id": 84,
+    "text": "The government should provide sufficient incentives to encourage businesses to adopt environmentally friendly practices",
+    "difficulty": "hard",
+    "category": "environment"
+  },
+  {
+    "id": 85,
+    "text": "The most effective way to improve your pronunciation is through consistent practice and active listening",
+    "difficulty": "medium",
+    "category": "education"
+  },
+  {
+    "id": 86,
+    "text": "The exclusive resort offers a luxurious experience with personalized service and breathtaking ocean views",
+    "difficulty": "medium",
+    "category": "travel"
+  },
+  {
+    "id": 87,
+    "text": "It is crucial to distinguish between facts and opinions when evaluating information from online sources",
+    "difficulty": "hard",
+    "category": "education"
+  },
+  {
+    "id": 88,
+    "text": "The entrepreneur took a calculated risk by investing heavily in the emerging technology sector",
+    "difficulty": "hard",
+    "category": "business"
+  },
+  {
+    "id": 89,
+    "text": "The invention of the printing press was a revolutionary development that transformed the dissemination of knowledge",
+    "difficulty": "hard",
+    "category": "history"
+  },
+  {
+    "id": 90,
+    "text": "The ability to adapt quickly to changing circumstances is one of the most valuable skills in today's job market",
+    "difficulty": "hard",
+    "category": "career"
+  },
+  {
+    "id": 91,
+    "text": "Peter Piper picked a peck of pickled peppers",
+    "translation": "彼得·派珀挑了一配克腌胡椒",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "P"]
+  },
+  {
+    "id": 92,
+    "text": "Red lorry yellow lorry",
+    "translation": "红色卡车黄色卡车",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "L-R"]
+  },
+  {
+    "id": 93,
+    "text": "How much wood would a woodchuck chuck if a woodchuck could chuck wood",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "W-CH"]
+  },
+  {
+    "id": 94,
+    "text": "I saw Susie sitting in a shoeshine shop",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "S-SH"]
+  },
+  {
+    "id": 95,
+    "text": "Fuzzy Wuzzy was a bear Fuzzy Wuzzy had no hair",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "Z"]
+  },
+  {
+    "id": 96,
+    "text": "The sixth sick sheikh's sixth sheep's sick",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "S-SH-K"]
+  },
+  {
+    "id": 97,
+    "text": "I thought a thought but the thought I thought was not the thought I thought I thought",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "TH"]
+  },
+  {
+    "id": 98,
+    "text": "Which wristwatches are Swiss wristwatches",
+    "difficulty": "hard",
+    "category": "tongue_twister",
+    "tags": ["tongue-twister", "W-SW"]
+  },
+  {
+    "id": 99,
+    "text": "The beneficial effects of regular physical activity on mental health have been extensively documented by researchers",
+    "difficulty": "hard",
+    "category": "health"
+  },
+  {
+    "id": 100,
+    "text": "Education is not merely about acquiring knowledge but about developing the capacity to think independently",
+    "difficulty": "hard",
+    "category": "education"
+  }
+]
