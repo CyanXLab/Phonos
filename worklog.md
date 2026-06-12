@@ -54,3 +54,55 @@ Stage Summary:
   8. FSRS parameter adjustment based on learning speed
   9. Enhanced statistics UI with greeting, heatmap, recommendations
   10. Backward compatibility: no token = default user
+
+---
+Task ID: 3
+Agent: Main Agent
+Task: Add dual learning mode (sequential/smart), word review, dictation error tracking, data change detection
+
+Work Log:
+- Analyzed user requirements: smart mode with FSRS integration, sequential mode with ID range, data change detection, word review, dictation error tracking
+- Modified learning_algorithm.py:
+  - Added sentences_count, start_id, end_id columns to user_sequential_position table
+  - Added migration for existing databases
+  - Changed get_sequential_position() to return dict instead of int
+  - Added set_sequential_range() for ID range support
+  - Added get_smart_recommendation_score() for FSRS+weakness combined scoring
+  - Added get_sentences_hash() for change detection
+- Modified main.py:
+  - Enhanced /api/mode/sequential/next with start_id/end_id query params
+  - Added data change detection (compares stored vs current sentence count)
+  - Added POST /api/mode/sequential/set-range endpoint
+  - Enhanced /api/mode/smart/next with scoring-based ranking
+  - Enhanced /api/mode/status with data_changed, smart_mode_info
+- Modified index.html:
+  - Added learning mode selector (智能/顺序) in header
+  - Added mode settings gear button for sequential ID range
+  - Added data change notification banner
+  - Added sequential mode ID range dialog modal
+  - Added word review modal with card-based UI and FSRS rating buttons
+- Modified style.css:
+  - Mode selector pill toggle styles
+  - Data change banner with slide-down animation
+  - ID range dialog styles
+  - Word review modal with word cards, error badges, rating grid
+  - Responsive additions for mobile
+- Modified app.js:
+  - Added learningMode state, modeStatus, wordReviewQueue, wordReviewIndex states
+  - Added loadLearningMode/saveLearningMode (localStorage persistence)
+  - Modified loadSentence() to use mode-specific endpoints
+  - Added data change detection with showDataChangeBanner()
+  - Added openIdRangeDialog/confirmIdRange functions
+  - Added openWordReview/submitWordReviewRating functions
+  - Added recordDictationErrors() auto-called in checkDictation()
+  - Enhanced evaluation recording with pronunciation error words
+- Updated README.md with new features and API endpoints
+
+Stage Summary:
+- Dual learning mode: sequential (with ID range) + smart (FSRS+weakness scoring)
+- Data change detection: auto-detects when sentence data is updated
+- Word review: FSRS-driven review queue for error words
+- Dictation error tracking: auto-records incorrect words on check
+- Pronunciation error tracking: auto-records words with accuracy < 60%
+- New API endpoints: POST /api/mode/sequential/set-range, enhanced sequential/smart/status
+- All syntax checks pass (Python + JavaScript)
