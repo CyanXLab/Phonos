@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Phonos - 口语练习平台</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+</head>
+<body>
+<div id="app">
+    <!-- Header -->
+    <header class="header">
+        <div class="header-inner">
+            <div class="logo">
+                <div class="logo-mark">P</div>
+                <span class="logo-text">Phonos</span>
+            </div>
+            <div class="header-actions">
+                <div class="review-counter" id="reviewCounter" style="display:none;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                    <span id="reviewCount">0</span>句待复习
+                </div>
+                <button class="btn-icon" id="btnStats" title="学习统计">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+                </button>
+                <button class="btn-icon" id="btnPhonemeGuide" title="音素指南">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2zM22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+                </button>
+                <span class="status-dot" id="statusDot"></span>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <!-- 句子卡片 -->
+        <div class="card sentence-card">
+            <div class="card-top">
+                <div class="badges-row">
+                    <div class="diff-badge" id="diffBadge">...</div>
+                    <div class="review-badge" id="reviewBadge" style="display:none;">新句</div>
+                </div>
+                <button class="btn-icon" id="btnRefresh" title="换一句">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6M3 12a9 9 0 0 1 15-6.7L21 8M3 22v-6h6M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                </button>
+            </div>
+            <p class="sentence-en" id="sentenceEn">加载中...</p>
+            <p class="sentence-zh" id="sentenceZh"></p>
+
+            <!-- TTS + IPA -->
+            <div class="sentence-tools">
+                <button class="btn-tool" id="btnTTS" title="标准美式发音">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+                    标准发音
+                </button>
+                <button class="btn-tool" id="btnToggleIPA" title="音标">
+                    <span>/IPA/</span>
+                </button>
+            </div>
+
+            <!-- IPA Display with clickable phonemes -->
+            <div class="ipa-section" id="ipaSection" style="display:none;">
+                <div class="ipa-phonemes" id="ipaPhonemes"></div>
+            </div>
+
+            <!-- Key phrases -->
+            <div class="phrases-section" id="phrasesSection" style="display:none;">
+                <h4 class="mini-title">重点词组</h4>
+                <div id="phrasesList"></div>
+            </div>
+
+            <!-- Cultural note -->
+            <div class="cultural-note" id="culturalNote" style="display:none;"></div>
+        </div>
+
+        <!-- 口语练习卡片（在句子下方，这样用户能看到句子来读） -->
+        <div class="card recording-card" id="recordingCard" style="display:none;">
+            <div class="card-top">
+                <h3 class="card-title-sm">口语练习</h3>
+                <span class="dictation-phase practice">口语</span>
+            </div>
+            <div class="waveform-wrap">
+                <canvas id="waveformCanvas"></canvas>
+                <div class="waveform-placeholder" id="waveformPlaceholder">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/></svg>
+                    <span>点击下方按钮开始录音</span>
+                </div>
+            </div>
+
+            <div class="rec-controls">
+                <button class="btn-record" id="btnRecord">
+                    <div class="rec-ring"><div class="rec-dot" id="recDot"></div></div>
+                    <span class="rec-label" id="recLabel">开始录音</span>
+                </button>
+            </div>
+
+            <div class="rec-info" id="recInfo" style="display:none;">
+                <span class="rec-blink"></span>
+                <span id="recTime">0:00</span>
+            </div>
+
+            <!-- Playback -->
+            <div class="playback-bar" id="playbackBar" style="display:none;">
+                <button class="btn-play" id="btnPlayback" title="回放录音">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                </button>
+                <div class="playback-progress">
+                    <div class="playback-fill" id="playbackFill"></div>
+                </div>
+                <span class="playback-time" id="playbackTime">0:00</span>
+                <button class="btn-submit" id="btnSubmit">提交评测</button>
+            </div>
+        </div>
+
+        <!-- 单词学习卡片（默认折叠） -->
+        <div class="card words-card" id="wordsCard">
+            <div class="card-top">
+                <h3 class="card-title-sm collapse-toggle collapsed" id="btnToggleWords">
+                    词汇学习
+                    <span class="collapse-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></span>
+                </h3>
+            </div>
+            <div class="words-list collapse-content collapsed" id="wordsList"></div>
+        </div>
+
+        <!-- 听写卡片（在最下面，防止看到答案） -->
+        <div class="card dictation-card" id="dictationCard" style="display:none;">
+            <div class="card-top">
+                <div class="dictation-header-left">
+                    <h3 class="card-title-sm">听写模式</h3>
+                    <span class="dictation-phase" id="dictationPhase">听写</span>
+                </div>
+                <div class="dictation-tts-controls">
+                    <button class="btn-tool btn-tts-dictation" id="btnTTSDictation" title="再听一遍">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                        再听一遍
+                    </button>
+                    <div class="speed-controls">
+                        <button class="speed-btn" data-speed="0.5" title="0.5倍速">0.5x</button>
+                        <button class="speed-btn" data-speed="0.75" title="0.75倍速">0.75x</button>
+                        <button class="speed-btn active" data-speed="1.0" title="1倍速">1x</button>
+                    </div>
+                </div>
+            </div>
+            <div class="dictation-inputs" id="dictationInputs"></div>
+            <div class="dictation-actions" id="dictationActions">
+                <button class="btn-primary btn-dictation-check" id="btnDictationCheck">提交检查</button>
+                <button class="btn-secondary btn-skip-dictation" id="btnSkipDictation" title="跳过听写，直接开口说">
+                    跳过听写
+                </button>
+            </div>
+            <div class="dictation-results" id="dictationResults" style="display:none;"></div>
+            <div class="dictation-transition" id="dictationTransition" style="display:none;">
+                <button class="btn-primary btn-start-practice" id="btnStartPractice">
+                    开始口语练习
+                </button>
+            </div>
+        </div>
+
+        <!-- Loading -->
+        <div class="card loading-card" id="loadingCard" style="display:none;">
+            <div class="spinner"></div>
+            <p>正在评测发音...</p>
+        </div>
+
+        <!-- 结果卡片 -->
+        <div class="card result-card" id="resultCard" style="display:none;">
+            <div class="card-top">
+                <h3 class="card-title-sm">评测结果</h3>
+            </div>
+
+            <!-- 总分 -->
+            <div class="score-hero">
+                <svg class="score-ring-svg" viewBox="0 0 120 120">
+                    <circle cx="60" cy="60" r="52" fill="none" stroke="#eef2ff" stroke-width="8"/>
+                    <circle cx="60" cy="60" r="52" fill="none" stroke-width="8" stroke-linecap="round"
+                        id="scoreRing" stroke="#4f46e5"
+                        stroke-dasharray="326.73" stroke-dashoffset="326.73"
+                        transform="rotate(-90 60 60)"/>
+                </svg>
+                <div class="score-center">
+                    <span class="score-num" id="overallScore">0</span>
+                    <span class="score-of">/100</span>
+                </div>
+            </div>
+
+            <!-- 分项 -->
+            <div class="sub-scores">
+                <div class="sub-row">
+                    <span class="sub-name">发音准确度</span>
+                    <div class="sub-bar"><div class="sub-fill" id="pronFill"></div></div>
+                    <span class="sub-val" id="pronVal">0</span>
+                </div>
+                <div class="sub-row">
+                    <span class="sub-name">完整度</span>
+                    <div class="sub-bar"><div class="sub-fill" id="compFill"></div></div>
+                    <span class="sub-val" id="compVal">0</span>
+                </div>
+                <div class="sub-row">
+                    <span class="sub-name">流利度</span>
+                    <div class="sub-bar"><div class="sub-fill" id="fluFill"></div></div>
+                    <span class="sub-val" id="fluVal">0</span>
+                </div>
+            </div>
+
+            <!-- 单词评分 -->
+            <div class="word-scores-sec" id="wordScoresSec">
+                <h4 class="mini-title collapse-toggle collapsed" id="btnToggleWordScores">单词评分 <span class="collapse-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></span></h4>
+                <div class="word-score-grid collapse-content collapsed" id="wordScoreGrid"></div>
+            </div>
+
+            <!-- 音素对比 -->
+            <div class="phoneme-sec" id="phonemeSec">
+                <h4 class="mini-title">音素对比</h4>
+                <div class="phoneme-row"><span class="ph-label">期望</span><div class="ph-chips" id="phExpected"></div></div>
+                <div class="phoneme-row"><span class="ph-label">实际</span><div class="ph-chips" id="phActual"></div></div>
+            </div>
+
+            <!-- 流利度 -->
+            <div class="fluency-sec" id="fluencySec">
+                <h4 class="mini-title">流利度详情</h4>
+                <div class="flu-grid">
+                    <div class="flu-item"><span class="flu-label">总时长</span><span class="flu-val" id="fluDuration">-</span></div>
+                    <div class="flu-item"><span class="flu-label">语速</span><span class="flu-val" id="fluRate">-</span></div>
+                    <div class="flu-item"><span class="flu-label">停顿</span><span class="flu-val" id="fluPauses">-</span></div>
+                    <div class="flu-item"><span class="flu-label">停顿时长</span><span class="flu-val" id="fluPauseDur">-</span></div>
+                </div>
+            </div>
+
+            <!-- 发音建议（默认折叠） -->
+            <div class="tips-sec" id="tipsSec">
+                <h4 class="mini-title collapse-toggle collapsed" id="btnToggleTips">发音问题与改进建议 <span class="collapse-arrow"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></span></h4>
+                <div class="tips-list collapse-content collapsed" id="tipsList"></div>
+            </div>
+
+            <!-- FSRS Rating -->
+            <div class="fsrs-section" id="fsrsSection">
+                <h4 class="mini-title">记忆评级</h4>
+                <p class="fsrs-hint">你对这句话的掌握程度如何？</p>
+                <div class="fsrs-buttons">
+                    <button class="fsrs-btn fsrs-again" data-rating="1" title="完全不记得">
+                        <span class="fsrs-icon"></span>
+                        <span class="fsrs-label">Again</span>
+                        <span class="fsrs-desc">完全不记得</span>
+                    </button>
+                    <button class="fsrs-btn fsrs-hard" data-rating="2" title="很吃力">
+                        <span class="fsrs-icon"></span>
+                        <span class="fsrs-label">Hard</span>
+                        <span class="fsrs-desc">很吃力</span>
+                    </button>
+                    <button class="fsrs-btn fsrs-good" data-rating="3" title="还行">
+                        <span class="fsrs-icon"></span>
+                        <span class="fsrs-label">Good</span>
+                        <span class="fsrs-desc">还行</span>
+                    </button>
+                    <button class="fsrs-btn fsrs-easy" data-rating="4" title="很轻松">
+                        <span class="fsrs-icon"></span>
+                        <span class="fsrs-label">Easy</span>
+                        <span class="fsrs-desc">很轻松</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 操作 -->
+            <div class="result-actions">
+                <button class="btn-primary" id="btnRetry">重新录音</button>
+                <button class="btn-secondary" id="btnNext">下一句</button>
+            </div>
+        </div>
+    </main>
+
+    <!-- 音素指南模态框 -->
+    <div class="modal-overlay" id="phonemeModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>音素发音指南 (44 Phonemes)</h3>
+                <button class="btn-icon modal-close" id="closePhonemeModal">x</button>
+            </div>
+            <div class="modal-body" id="phonemeModalBody"></div>
+        </div>
+    </div>
+
+    <!-- 统计模态框 -->
+    <div class="modal-overlay" id="statsModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>学习统计</h3>
+                <button class="btn-icon modal-close" id="closeStatsModal">x</button>
+            </div>
+            <div class="modal-body" id="statsModalBody"></div>
+        </div>
+    </div>
+
+    <!-- 回放音频元素 -->
+    <audio id="playbackAudio" style="display:none;"></audio>
+    <!-- TTS服务端音频 -->
+    <audio id="ttsAudio" style="display:none;"></audio>
+
+    <footer class="footer">
+        <p>Phonos · Powered by HuPER-Recognizer (WavLM-Large + CTC)</p>
+    </footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
