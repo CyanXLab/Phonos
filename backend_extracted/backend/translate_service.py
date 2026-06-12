@@ -3,19 +3,32 @@
 
 优先级：
 1. 本地缓存（已翻译过的）
-2. Bing Translate API（免费，无需API key）
-3. 本地离线翻译（argos-translate 或简易词典）
+2. 在线翻译 API（Edge Translator → MyMemory → Google，多次失败后跳过）
+3. ONNX 翻译模型（本地 Seq2Seq 模型，在线 API 失败时使用）
+4. 简易词典（最后的回退）
+
+在线 API 失败计数器：连续失败 N 次后，暂时跳过在线 API，
+直接使用 ONNX 翻译模型，避免浪费时间等待超时。
 """
 
 import json
 import os
 import re
 import hashlib
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 _CACHE_FILE = Path(__file__).parent / "translation_cache.json"
 _cache: dict = {}
+
+# 在线 API 失败计数与冷却
+_api_fail_count = 0          # 连续失败次数
+_api_fail_lock = threading.Lock()
+_API_SKIP_THRESHOLD = 3      # 连续失败 N 次后跳过在线 API
+_API_COOLDOWN_SEC = 300      # 冷却时间（秒），之后重新尝试在线 API
+_api_skip_until = 0.0        # 跳过在线 API 直到这个时间戳
 
 
 def _load_cache():
@@ -41,47 +54,152 @@ def _cache_key(text: str) -> str:
 
 
 # ============================================================
-# Bing Translate (free, no API key needed)
+# 在线 API 失败计数管理
 # ============================================================
-def translate_bing(text: str, from_lang: str = "en", to_lang: str = "zh-Hans") -> Optional[str]:
-    """使用必应翻译API（免费，无需API key）"""
+def _record_api_success():
+    """在线 API 调用成功，重置失败计数"""
+    global _api_fail_count, _api_skip_until
+    with _api_fail_lock:
+        _api_fail_count = 0
+        _api_skip_until = 0.0
+
+
+def _record_api_failure():
+    """在线 API 调用失败，增加计数；达到阈值后进入冷却期"""
+    global _api_fail_count, _api_skip_until
+    with _api_fail_lock:
+        _api_fail_count += 1
+        if _api_fail_count >= _API_SKIP_THRESHOLD:
+            _api_skip_until = time.time() + _API_COOLDOWN_SEC
+
+
+def _should_skip_online_apis() -> bool:
+    """是否应该跳过在线 API（因为连续失败太多）"""
+    global _api_fail_count, _api_skip_until
+    with _api_fail_lock:
+        if _api_fail_count < _API_SKIP_THRESHOLD:
+            return False
+        if time.time() > _api_skip_until:
+            # 冷却期已过，重置计数，允许再次尝试
+            _api_fail_count = 0
+            _api_skip_until = 0.0
+            return False
+        return True
+
+
+# ============================================================
+# Microsoft Edge Translator (MET) — 免费 JWT 认证 + 官方 API
+# 2025+ Bing 简单 GET 已失效（403），改用 Edge 浏览器认证通道
+# ============================================================
+_EDGE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
+)
+
+_edge_token = None          # JWT token
+_edge_token_expires = 0.0   # token 过期时间（epoch秒）
+_edge_token_lock = threading.Lock()
+
+
+def _fetch_edge_token() -> bool:
+    """从 Edge 浏览器认证端点获取免费 JWT token（有效期约10分钟）"""
+    global _edge_token, _edge_token_expires
     try:
         import urllib.request
-        import urllib.parse
-        import json as _json
+        import base64
 
-        # Bing翻译的免费接口
         req = urllib.request.Request(
-            f"https://www.bing.com/ttranslatev3?fromLang={from_lang}&to={to_lang}&text={urllib.parse.quote(text)}",
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            }
+            "https://edge.microsoft.com/translate/auth",
+            headers={"User-Agent": _EDGE_USER_AGENT}
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            token = resp.read().decode("utf-8").strip()
+            if not token or len(token) < 20:
+                print("[翻译] Edge Token 获取返回空或过短")
+                return False
+
+            # 解析 JWT 过期时间
+            try:
+                payload_b64 = token.split(".")[1]
+                payload_b64 += "=" * (4 - len(payload_b64) % 4)
+                payload = json.loads(base64.b64decode(payload_b64))
+                exp = payload.get("exp", 0)
+                _edge_token_expires = exp
+            except Exception:
+                # 解析失败，保守估计5分钟有效
+                _edge_token_expires = time.time() + 300
+
+            _edge_token = token
+            print(f"[翻译] Edge Token 获取成功，有效期至 {_edge_token_expires}")
+            return True
+    except Exception as e:
+        print(f"[翻译] Edge Token 获取失败: {e}")
+        return False
+
+
+def _is_edge_token_expired() -> bool:
+    """Edge token 是否已过期（提前60秒刷新）"""
+    if not _edge_token:
+        return True
+    return (time.time() + 60) >= _edge_token_expires
+
+
+def translate_edge(text: str, from_lang: str = "en", to_lang: str = "zh-Hans") -> Optional[str]:
+    """使用 Microsoft Edge Translator 免费翻译（官方 API + JWT 认证）"""
+    global _edge_token
+    try:
+        import urllib.request
+
+        with _edge_token_lock:
+            if _is_edge_token_expired():
+                if not _fetch_edge_token():
+                    return None
+
+        # 构造请求：官方 Microsoft Translator API
+        to_code = "zh-Hans" if to_lang in ("zh", "zh-CN", "zh-Hans") else to_lang
+        url = f"https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&from={from_lang}&to={to_code}"
+        body = json.dumps([{"Text": text}]).encode("utf-8")
+
+        req = urllib.request.Request(url, data=body, headers={
+            "User-Agent": _EDGE_USER_AGENT,
+            "Authorization": f"Bearer {_edge_token}",
+            "Content-Type": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
             if isinstance(data, list) and len(data) > 0:
-                return data[0].get("translations", [{}])[0].get("text", "")
-            elif isinstance(data, dict):
-                return data.get("translations", [{}])[0].get("text", "")
-    except Exception:
-        pass
+                translations = data[0].get("translations", [])
+                if translations:
+                    return translations[0].get("text", "")
+    except Exception as e:
+        print(f"[翻译] Edge Translator 失败: {e}")
+        # Token 可能失效，标记为过期以便下次重新获取
+        with _edge_token_lock:
+            _edge_token = None
     return None
 
 
 # ============================================================
-# Argos Translate (offline)
+# MyMemory Translation API（免费，无需 API key，每天5K字符）
 # ============================================================
-def translate_argos(text: str, from_lang: str = "en", to_lang: str = "zh") -> Optional[str]:
-    """使用 argos-translate 离线翻译"""
+def translate_mymemory(text: str, from_lang: str = "en", to_lang: str = "zh-CN") -> Optional[str]:
+    """使用 MyMemory API 翻译（免费，每天5K字符匿名额度）"""
     try:
-        from argostranslate import translate
-        translated = translate.translate(text, from_lang, to_lang)
-        if translated and translated != text:
-            return translated
-    except ImportError:
-        pass
-    except Exception:
-        pass
+        import urllib.request
+        import urllib.parse
+
+        encoded = urllib.parse.quote(text)
+        url = f"https://api.mymemory.translated.net/get?q={encoded}&langpair={from_lang}|{to_lang}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            translated = data.get("responseData", {}).get("translatedText", "")
+            # MyMemory 有时会返回大写提示（如 "MYMEMORY WARNING ..."），过滤掉
+            if translated and not translated.startswith("MYMEMORY"):
+                return translated
+    except Exception as e:
+        print(f"[翻译] MyMemory 失败: {e}")
     return None
 
 
@@ -104,7 +222,39 @@ def translate_google(text: str, from_lang: str = "en", to_lang: str = "zh-CN") -
 
 
 # ============================================================
-# Simple built-in phrase dictionary (offline fallback)
+# ONNX 翻译模型（本地 Seq2Seq 模型，替代 Argos Translate）
+# 使用 optimum.onnxruntime ORTModelForSeq2SeqLM 加载
+# ============================================================
+def translate_onnx(text: str, from_lang: str = "en", to_lang: str = "zh") -> Optional[str]:
+    """使用 ONNX 翻译模型本地离线翻译（Seq2Seq + ONNX Runtime）
+    
+    模型路径与 HuPER 音素模型在同一 models/ 目录下（models/onnx_quant）。
+    使用 optimum.onnxruntime ORTModelForSeq2SeqLM + transformers pipeline。
+    """
+    try:
+        from onnx_translate_service import translate_onnx as _onnx_translate
+        result = _onnx_translate(text)
+        if result and result.strip() and result.strip() != text.strip():
+            print(f"[翻译] ONNX 模型翻译成功: {text[:50]} -> {result[:50]}")
+            return result.strip()
+    except ImportError:
+        print("[翻译] onnx_translate_service 模块未找到")
+    except Exception as e:
+        print(f"[翻译] ONNX 模型翻译失败: {e}")
+    return None
+
+
+def is_onnx_translate_available() -> bool:
+    """检查 ONNX 翻译模型是否可用"""
+    try:
+        from onnx_translate_service import is_onnx_translate_available as _check
+        return _check()
+    except Exception:
+        return False
+
+
+# ============================================================
+# Simple built-in phrase dictionary (last offline fallback)
 # ============================================================
 _SIMPLE_DICT = {
     "the": "这/那", "a": "一个", "an": "一个", "is": "是", "are": "是", "was": "是(过去)",
@@ -137,19 +287,38 @@ _SIMPLE_DICT = {
 }
 
 def translate_simple(text: str) -> Optional[str]:
-    """简易词典翻译（最后的回退）"""
-    words = re.sub(r'[^a-z\s]', '', text.lower()).split()
-    translated = []
+    """简易词典翻译（最后的回退）
+    
+    改进：只翻译功能词（冠词、介词、代词等），
+    实词保持英文原样，避免产出"这/那(spontaneous applause)"这样的乱码。
+    """
+    words = text.split()
+    translated_parts = []
+    untranslated = []
+    
     for w in words:
-        if w in _SIMPLE_DICT:
-            translated.append(_SIMPLE_DICT[w])
+        key = re.sub(r'[^a-z]', '', w.lower())
+        if key in _SIMPLE_DICT:
+            # 功能词有翻译
+            if untranslated:
+                translated_parts.append(' '.join(untranslated))
+                untranslated = []
+            translated_parts.append(_SIMPLE_DICT[key])
         else:
-            translated.append(f"({w})")
-    if translated:
-        result = "".join(translated)
-        # 简单清理连续括号
-        result = re.sub(r'\)\(', " ", result)
-        return result
+            # 实词保持英文
+            untranslated.append(w)
+    
+    if untranslated:
+        translated_parts.append(' '.join(untranslated))
+    
+    if translated_parts:
+        # 用自然的方式拼接：翻译的词直接连，未翻译的英文词保持
+        result = ''
+        for part in translated_parts:
+            if result:
+                result += ' '
+            result += part
+        return result if result.strip() else None
     return None
 
 
@@ -169,44 +338,140 @@ def translate_text(text: str, force: bool = False) -> str:
     """
     翻译英文文本到中文
 
-    优先级：缓存 → Bing → Google → Argos → 简易词典
+    优先级：缓存 → [在线API（Edge → MyMemory → Google）] → ONNX翻译模型 → 简易词典
+
+    在线 API 连续失败 ≥ 3 次后，进入 5 分钟冷却期，
+    期间直接使用 ONNX 翻译模型，避免等待超时。
+    """
+    detail = translate_text_detail(text, force)
+    return detail["translation"]
+
+
+def translate_text_detail(text: str, force: bool = False) -> dict:
+    """
+    翻译英文文本到中文（详细版，返回来源信息）
+
+    返回:
+        {
+            "original": str,       # 原文
+            "translation": str,    # 翻译结果
+            "source": str,         # 翻译来源: cache / edge / mymemory / google / onnx / dictionary / none
+            "online_api_skipped": bool  # 在线 API 是否被跳过（冷却中）
+        }
     """
     ensure_initialized()
 
+    empty_result = {
+        "original": text or "",
+        "translation": "",
+        "source": "none",
+        "online_api_skipped": False,
+    }
+
     if not text or not text.strip():
-        return ""
+        return empty_result
 
     # 检查缓存
     key = _cache_key(text)
     if not force and key in _cache:
-        return _cache[key]
+        return {
+            "original": text,
+            "translation": _cache[key],
+            "source": "cache",
+            "online_api_skipped": False,
+        }
 
-    # 1. 尝试 Bing
-    result = translate_bing(text)
+    # ---- 在线 API 阶段 ----
+    online_skipped = _should_skip_online_apis()
+    if not online_skipped:
+        # 1. 尝试 Microsoft Edge Translator（免费JWT认证+官方API，最稳定）
+        result = translate_edge(text)
+        if result and result.strip():
+            _record_api_success()
+            _cache[key] = result
+            _save_cache()
+            print(f"[翻译] Edge Translator 成功: {text[:40]} -> {result[:40]}")
+            return {
+                "original": text,
+                "translation": result,
+                "source": "edge",
+                "online_api_skipped": False,
+            }
+
+        # 2. 尝试 MyMemory（免费，每天5K字符）
+        result = translate_mymemory(text)
+        if result and result.strip():
+            _record_api_success()
+            _cache[key] = result
+            _save_cache()
+            print(f"[翻译] MyMemory 成功: {text[:40]} -> {result[:40]}")
+            return {
+                "original": text,
+                "translation": result,
+                "source": "mymemory",
+                "online_api_skipped": False,
+            }
+
+        # 3. 尝试 Google（需安装 googletrans）
+        result = translate_google(text)
+        if result and result.strip():
+            _record_api_success()
+            _cache[key] = result
+            _save_cache()
+            print(f"[翻译] Google 成功: {text[:40]} -> {result[:40]}")
+            return {
+                "original": text,
+                "translation": result,
+                "source": "google",
+                "online_api_skipped": False,
+            }
+
+        # 在线 API 全部失败
+        _record_api_failure()
+        print(f"[翻译] 在线 API 均失败（连续第 {_api_fail_count} 次）")
+    else:
+        print(f"[翻译] 在线 API 冷却中，跳过")
+
+    # ---- 本地离线翻译阶段 ----
+    # 4. 尝试 ONNX 翻译模型（本地 Seq2Seq + ONNX Runtime）
+    result = translate_onnx(text)
     if result and result.strip():
         _cache[key] = result
         _save_cache()
-        return result
+        return {
+            "original": text,
+            "translation": result,
+            "source": "onnx",
+            "online_api_skipped": online_skipped,
+        }
 
-    # 2. 尝试 Google
-    result = translate_google(text)
-    if result and result.strip():
-        _cache[key] = result
-        _save_cache()
-        return result
-
-    # 3. 尝试 Argos (离线)
-    result = translate_argos(text)
-    if result and result.strip():
-        _cache[key] = result
-        _save_cache()
-        return result
-
-    # 4. 简易词典
+    # 5. 简易词典（最后的回退）
+    print(f"[翻译] 所有翻译服务失败，使用简易词典回退: {text[:60]}")
     result = translate_simple(text)
     if result and result.strip():
         _cache[key] = result
         _save_cache()
-        return result
+        return {
+            "original": text,
+            "translation": result,
+            "source": "dictionary",
+            "online_api_skipped": online_skipped,
+        }
 
-    return ""
+    return empty_result
+
+
+def get_translate_status() -> dict:
+    """获取翻译服务状态信息"""
+    onnx_available = is_onnx_translate_available()
+    online_skipped = _should_skip_online_apis()
+
+    return {
+        "online_api_available": not online_skipped,
+        "online_api_skip_reason": "cooldown" if online_skipped else None,
+        "onnx_available": onnx_available,
+        "simple_dictionary_available": True,
+        "fail_count": _api_fail_count,
+        "skip_threshold": _API_SKIP_THRESHOLD,
+        "cooldown_seconds": _API_COOLDOWN_SEC,
+    }

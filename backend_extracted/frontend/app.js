@@ -53,7 +53,6 @@ const S = {
     wordsExpanded: false,
     ipaVisible: false,
     phonemeTips: null,
-    stats: loadStats(),
     // --- New state ---
     mode: 'dictation',          // 'dictation' | 'practice'
     ttsFailCount: 0,
@@ -62,19 +61,190 @@ const S = {
     fsrsRated: false,           // whether user has rated this sentence
     sentenceType: 'new',        // 'new' | 'review'
     pendingReviewCount: 0,
+    pendingWordReviewCount: 0,
     ttsSpeed: 1.0,              // TTS playback speed for dictation
     phonemeAudioCache: {},      // Cache for IPA audio blobs
+    // --- Auth state ---
+    user: null,                 // {id, username, display_name, avatar_color, settings}
+    authToken: null,            // Bearer token
+    serverStats: null,          // Server-side per-user stats (from DB, cross-browser sync)
+    weaknessProfile: null,      // User's weakness analysis
+    // --- Learning mode state ---
+    learningMode: 'smart',       // 'smart' | 'sequential'
+    modeStatus: null,            // cached /api/mode/status response
+    wordReviewQueue: [],         // Word review queue items
+    wordReviewIndex: 0,          // Current index in review queue
+    wordReviewTotal: 0,          // Total items in review queue
 };
 
-function loadStats() {
+// 统计数据全部存储在服务端数据库中，跨浏览器自动同步
+// 前端不再使用 localStorage 存储统计，所有数据从 /api/stats 获取
+
+// ============================================================
+// Auth helpers
+// ============================================================
+function loadAuth() {
     try {
-        const d = localStorage.getItem('phonos_stats');
-        return d ? JSON.parse(d) : { total: 0, scores: [], errors: {}, words_learned: {}, sessions: 0 };
-    } catch { return { total: 0, scores: [], errors: {}, words_learned: {}, sessions: 0 }; }
+        const token = localStorage.getItem('phonos_auth_token');
+        const user = localStorage.getItem('phonos_user');
+        if (token && user) {
+            S.authToken = token;
+            S.user = JSON.parse(user);
+            return true;
+        }
+    } catch {}
+    return false;
 }
 
-function saveStats() {
-    try { localStorage.setItem('phonos_stats', JSON.stringify(S.stats)); } catch {}
+function saveAuth(token, user) {
+    S.authToken = token;
+    S.user = user;
+    try {
+        localStorage.setItem('phonos_auth_token', token);
+        localStorage.setItem('phonos_user', JSON.stringify(user));
+    } catch {}
+}
+
+function clearAuth() {
+    S.authToken = null;
+    S.user = null;
+    try {
+        localStorage.removeItem('phonos_auth_token');
+        localStorage.removeItem('phonos_user');
+    } catch {}
+}
+
+async function fetchWithAuth(url, options = {}) {
+    if (S.authToken) {
+        if (!options.headers) options.headers = {};
+        options.headers['Authorization'] = `Bearer ${S.authToken}`;
+    }
+    return fetch(url, options);
+}
+
+async function validateToken() {
+    if (!S.authToken) return false;
+    try {
+        const r = await fetchWithAuth(`${API}/api/auth/me`);
+        if (r.ok) {
+            S.user = await r.json();
+            return true;
+        } else {
+            clearAuth();
+            return false;
+        }
+    } catch {
+        return false;
+    }
+}
+
+async function doLogin(username, password) {
+    const r = await fetch(`${API}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.detail || '登录失败');
+    }
+    const data = await r.json();
+    saveAuth(data.token, data.user);
+    return data;
+}
+
+async function doRegister(username, password, display_name) {
+    const r = await fetch(`${API}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, display_name }),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.detail || '注册失败');
+    }
+    const data = await r.json();
+    saveAuth(data.token, data.user);
+    return data;
+}
+
+async function doLogout() {
+    if (S.authToken) {
+        try { await fetchWithAuth(`${API}/api/auth/logout`, { method: 'POST' }); } catch {}
+    }
+    clearAuth();
+}
+
+async function doGuestLogin() {
+    // No login needed, just clear auth and use default user
+    clearAuth();
+}
+
+function updateUserProfileUI() {
+    const profile = document.getElementById('userProfile');
+    const avatar = document.getElementById('userAvatar');
+    const name = document.getElementById('userName');
+    if (!profile || !avatar || !name) return;
+
+    if (S.user && S.user.id !== 'default') {
+        profile.style.display = 'flex';
+        avatar.style.background = S.user.avatar_color || '#6b7280';
+        avatar.textContent = (S.user.display_name || S.user.username || '?')[0].toUpperCase();
+        name.textContent = S.user.display_name || S.user.username;
+    } else {
+        profile.style.display = 'flex';
+        avatar.style.background = '#6b7280';
+        avatar.textContent = '?';
+        name.textContent = '访客';
+    }
+}
+
+function showAuthModal(mode = 'login') {
+    const modal = document.getElementById('authModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+
+    const loginForm = document.getElementById('loginForm');
+    const registerForm = document.getElementById('registerForm');
+    const authTitle = document.getElementById('authTitle');
+
+    loginForm.style.display = 'none';
+    registerForm.style.display = 'none';
+
+    if (mode === 'login') {
+        loginForm.style.display = '';
+        authTitle.textContent = '登录';
+    } else if (mode === 'register') {
+        registerForm.style.display = '';
+        authTitle.textContent = '注册';
+    }
+}
+
+function hideAuthModal() {
+    const modal = document.getElementById('authModal');
+    if (modal) modal.style.display = 'none';
+}
+
+// 不再提供用户列表功能，不暴露其他用户信息
+// 每个用户只看自己的数据，跨浏览器通过服务端数据库同步
+
+async function loadWeaknessProfile() {
+    if (!S.authToken) return;
+    try {
+        const r = await fetchWithAuth(`${API}/api/learning/weakness-profile`);
+        if (r.ok) S.weaknessProfile = await r.json();
+    } catch {}
+}
+
+async function loadServerStats() {
+    try {
+        const r = await fetchWithAuth(`${API}/api/stats`);
+        if (r.ok) {
+            S.serverStats = await r.json();
+            return S.serverStats;
+        }
+    } catch {}
+    return null;
 }
 
 // ============================================================
@@ -126,6 +296,21 @@ const el = {
     closeStatsModal: $('closeStatsModal'),
     // TTS audio element
     ttsAudio: $('ttsAudio'),
+    // Mode selector
+    modeSelector: $('modeSelector'), btnModeSmart: $('btnModeSmart'),
+    btnModeSequential: $('btnModeSequential'), btnModeSettings: $('btnModeSettings'),
+    // ID range dialog
+    idRangeModal: $('idRangeModal'), closeIdRangeModal: $('closeIdRangeModal'),
+    idRangeStart: $('idRangeStart'), idRangeEnd: $('idRangeEnd'),
+    idRangeInfo: $('idRangeInfo'), idRangeError: $('idRangeError'),
+    btnIdRangeConfirm: $('btnIdRangeConfirm'),
+    // Data change banner
+    dataChangeBanner: $('dataChangeBanner'), btnCloseDataChangeBanner: $('btnCloseDataChangeBanner'),
+    // Word review modal
+    wordReviewModal: $('wordReviewModal'), closeWordReviewModal: $('closeWordReviewModal'),
+    wordReviewProgress: $('wordReviewProgress'), wordReviewEmpty: $('wordReviewEmpty'),
+    wordReviewCards: $('wordReviewCards'),
+    btnWordReview: $('btnWordReview'),
 };
 
 // ============================================================
@@ -143,10 +328,30 @@ async function init() {
     initCanvas();
     bindEvents();
 
+    // Load learning mode from localStorage
+    loadLearningMode();
+
+    // Auth: try to load saved token
+    const hasAuth = loadAuth();
+    if (hasAuth && S.authToken) {
+        // Validate token with server
+        const valid = await validateToken();
+        if (!valid) {
+            // Token expired, but don't force login - just use guest mode
+            clearAuth();
+        }
+    }
+    updateUserProfileUI();
+
     // Non-critical: load in parallel, don't block
     checkHealth();
     loadPhonemeTips();
     fetchReviewCount();
+    // Fetch mode status BEFORE loading sentence (sequential mode needs start_id/end_id)
+    await fetchModeStatus();
+
+    // Load weakness profile if logged in
+    if (S.authToken) loadWeaknessProfile();
 
     // Critical: load sentence (with timeout protection)
     try {
@@ -178,12 +383,20 @@ async function loadPhonemeTips() {
 
 async function fetchReviewCount() {
     try {
-        const r = await fetch(`${API}/api/fsrs/due-count`);
-        if (r.ok) {
-            const d = await r.json();
-            S.pendingReviewCount = d.count || 0;
-            updateReviewCounter();
+        // Fetch both sentence and word due counts
+        const [sentenceR, wordR] = await Promise.all([
+            fetchWithAuth(`${API}/api/fsrs/due-count?card_type=sentence`),
+            fetchWithAuth(`${API}/api/fsrs/due-count?card_type=word`)
+        ]);
+        if (sentenceR.ok) {
+            const d = await sentenceR.json();
+            S.pendingReviewCount = d.count || 0;  // sentence due count
         }
+        if (wordR.ok) {
+            const d = await wordR.json();
+            S.pendingWordReviewCount = d.count || 0;  // word due count
+        }
+        updateReviewCounter();
     } catch { /* ignore */ }
 }
 
@@ -213,7 +426,7 @@ async function loadSentence(forceNew = false) {
         if (forceNew) {
             try {
                 const seed = Date.now();
-                const r = await fetch(`${API}/api/sentence?force_new=true&_t=${seed}`, {signal: AbortSignal.timeout(10000)});
+                const r = await fetchWithAuth(`${API}/api/sentence?force_new=true&_t=${seed}`, {signal: AbortSignal.timeout(10000)});
                 if (r.ok) {
                     const data = await r.json();
                     if (data && data.id && data.id !== prevId) {
@@ -225,10 +438,48 @@ async function loadSentence(forceNew = false) {
             } catch { /* fallback below */ }
         }
 
-        // Try FSRS queue first (only when not forceNew)
+        // Use mode-specific endpoint when not forceNew
         if (!loaded && !forceNew) {
             try {
-                const r = await fetch(`${API}/api/fsrs/next`, {signal: AbortSignal.timeout(8000)});
+                if (S.learningMode === 'sequential') {
+                    // Sequential mode
+                    let url = `${API}/api/mode/sequential/next`;
+                    if (S.modeStatus && S.modeStatus.start_id) {
+                        url += `?start_id=${S.modeStatus.start_id}`;
+                        if (S.modeStatus.end_id) url += `&end_id=${S.modeStatus.end_id}`;
+                    }
+                    const r = await fetchWithAuth(url, {signal: AbortSignal.timeout(8000)});
+                    if (r.ok) {
+                        const d = await r.json();
+                        if (d.sentence) {
+                            S.sentence = d.sentence;
+                            S.sentenceType = d.type || 'new';
+                            loaded = true;
+                            // Check for data change
+                            if (d.data_changed) {
+                                showDataChangeBanner();
+                            }
+                        }
+                    }
+                } else {
+                    // Smart mode (FSRS-based)
+                    const r = await fetchWithAuth(`${API}/api/mode/smart/next`, {signal: AbortSignal.timeout(8000)});
+                    if (r.ok) {
+                        const d = await r.json();
+                        if (d.sentence) {
+                            S.sentence = d.sentence;
+                            S.sentenceType = d.type || 'new';
+                            loaded = true;
+                        }
+                    }
+                }
+            } catch { /* fallback below */ }
+        }
+
+        // Fallback: try FSRS queue
+        if (!loaded && !forceNew) {
+            try {
+                const r = await fetchWithAuth(`${API}/api/fsrs/next`, {signal: AbortSignal.timeout(8000)});
                 if (r.ok) {
                     const d = await r.json();
                     if (d.sentence) {
@@ -240,13 +491,13 @@ async function loadSentence(forceNew = false) {
             } catch { /* fallback below */ }
         }
 
-        // Fallback: get a random sentence (ensure different from previous)
+        // Final fallback: get a random sentence (ensure different from previous)
         if (!loaded) {
             let attempts = 0;
             do {
                 try {
                     const seed = Date.now() + attempts;
-                    const r = await fetch(`${API}/api/sentence?_t=${seed}`, {signal: AbortSignal.timeout(8000)});
+                    const r = await fetchWithAuth(`${API}/api/sentence?_t=${seed}`, {signal: AbortSignal.timeout(8000)});
                     if (r.ok) {
                         const data = await r.json();
                         if (data && data.text) {
@@ -739,7 +990,7 @@ async function checkDictation() {
     // Try backend checking (uses Levenshtein distance)
     let backendResults = null;
     try {
-        const r = await fetch(`${API}/api/dictation/check`, {
+        const r = await fetchWithAuth(`${API}/api/dictation/check`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -831,6 +1082,9 @@ async function checkDictation() {
         el.dictationTransition.style.display = '';
         S.dictationResults = { correct: correctCount, total: expectedWords.length, checked: true };
     }
+
+    // Auto-record dictation errors
+    recordDictationErrors(inputs, expectedWords);
 }
 
 function transitionToPractice() {
@@ -883,7 +1137,7 @@ async function submitFSRSRating(rating) {
     const cardId = S.sentence.fsrs?.card_id || `sentence_${S.sentence.id}`;
 
     try {
-        const r = await fetch(`${API}/api/fsrs/review`, {
+        const r = await fetchWithAuth(`${API}/api/fsrs/review`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1024,6 +1278,113 @@ function bindEvents() {
 
     el.phonemeModal.addEventListener('click', e => { if (e.target === el.phonemeModal) el.phonemeModal.style.display = 'none'; });
     el.statsModal.addEventListener('click', e => { if (e.target === el.statsModal) el.statsModal.style.display = 'none'; });
+
+    // Mode selector events
+    if (el.btnModeSmart) el.btnModeSmart.addEventListener('click', () => switchLearningMode('smart'));
+    if (el.btnModeSequential) el.btnModeSequential.addEventListener('click', () => switchLearningMode('sequential'));
+    if (el.btnModeSettings) el.btnModeSettings.addEventListener('click', openIdRangeDialog);
+
+    // ID range dialog events
+    if (el.closeIdRangeModal) el.closeIdRangeModal.addEventListener('click', () => el.idRangeModal.style.display = 'none');
+    if (el.idRangeModal) el.idRangeModal.addEventListener('click', e => { if (e.target === el.idRangeModal) el.idRangeModal.style.display = 'none'; });
+    if (el.btnIdRangeConfirm) el.btnIdRangeConfirm.addEventListener('click', confirmIdRange);
+
+    // Data change banner
+    if (el.btnCloseDataChangeBanner) el.btnCloseDataChangeBanner.addEventListener('click', hideDataChangeBanner);
+
+    // Word review modal events
+    if (el.btnWordReview) el.btnWordReview.addEventListener('click', openWordReview);
+    if (el.closeWordReviewModal) el.closeWordReviewModal.addEventListener('click', () => el.wordReviewModal.style.display = 'none');
+    if (el.wordReviewModal) el.wordReviewModal.addEventListener('click', e => { if (e.target === el.wordReviewModal) el.wordReviewModal.style.display = 'none'; });
+
+    // Auth modal events
+    const authModal = document.getElementById('authModal');
+    const closeAuthModal = document.getElementById('closeAuthModal');
+    if (closeAuthModal) closeAuthModal.addEventListener('click', hideAuthModal);
+    if (authModal) authModal.addEventListener('click', e => { if (e.target === authModal) hideAuthModal(); });
+
+    const switchToRegister = document.getElementById('switchToRegister');
+    if (switchToRegister) switchToRegister.addEventListener('click', e => { e.preventDefault(); showAuthModal('register'); });
+    const switchToLogin = document.getElementById('switchToLogin');
+    if (switchToLogin) switchToLogin.addEventListener('click', e => { e.preventDefault(); showAuthModal('login'); });
+
+    const btnLogin = document.getElementById('btnLogin');
+    if (btnLogin) btnLogin.addEventListener('click', async () => {
+        const username = document.getElementById('loginUsername').value.trim();
+        const password = document.getElementById('loginPassword').value;
+        const errorEl = document.getElementById('loginError');
+        if (!username || !password) {
+            errorEl.textContent = '请输入用户名和密码';
+            errorEl.style.display = '';
+            return;
+        }
+        try {
+            btnLogin.disabled = true;
+            await doLogin(username, password);
+            hideAuthModal();
+            updateUserProfileUI();
+            loadWeaknessProfile();
+            loadSentence();
+        } catch (e) {
+            errorEl.textContent = e.message;
+            errorEl.style.display = '';
+        } finally {
+            btnLogin.disabled = false;
+        }
+    });
+
+    const btnRegister = document.getElementById('btnRegister');
+    if (btnRegister) btnRegister.addEventListener('click', async () => {
+        const username = document.getElementById('regUsername').value.trim();
+        const displayName = document.getElementById('regDisplayName').value.trim();
+        const password = document.getElementById('regPassword').value;
+        const passwordConfirm = document.getElementById('regPasswordConfirm').value;
+        const errorEl = document.getElementById('registerError');
+        if (!username || !password) {
+            errorEl.textContent = '请输入用户名和密码';
+            errorEl.style.display = '';
+            return;
+        }
+        if (password !== passwordConfirm) {
+            errorEl.textContent = '两次密码不一致';
+            errorEl.style.display = '';
+            return;
+        }
+        try {
+            btnRegister.disabled = true;
+            await doRegister(username, password, displayName);
+            hideAuthModal();
+            updateUserProfileUI();
+            loadSentence();
+        } catch (e) {
+            errorEl.textContent = e.message;
+            errorEl.style.display = '';
+        } finally {
+            btnRegister.disabled = false;
+        }
+    });
+
+    const btnGuestLogin = document.getElementById('btnGuestLogin');
+    if (btnGuestLogin) btnGuestLogin.addEventListener('click', () => {
+        doGuestLogin();
+        hideAuthModal();
+        updateUserProfileUI();
+        loadSentence();
+    });
+
+    // btnNewUser removed - no user list/switcher anymore
+
+    // User profile click -> show login dialog (not switcher)
+    const userProfile = document.getElementById('userProfile');
+    if (userProfile) userProfile.addEventListener('click', () => {
+        if (S.user && S.user.id !== 'default') {
+            // 已登录 -> 登出
+            if (confirm('确定要退出登录吗？')) doLogout().then(() => updateUserProfileUI());
+        } else {
+            // 未登录 -> 弹出登录框
+            showAuthModal('login');
+        }
+    });
 
     // Playback time update
     el.playbackAudio.addEventListener('timeupdate', () => {
@@ -1336,7 +1697,7 @@ async function submitEvaluation() {
         fd.append('audio', S.recordedBlob, `rec.${ext}`);
         fd.append('sentence_text', S.sentence.text);
 
-        const res = await fetch(`${API}/api/evaluate`, { method: 'POST', body: fd });
+        const res = await fetchWithAuth(`${API}/api/evaluate`, { method: 'POST', body: fd });
         if (!res.ok) throw new Error(`评测失败 (${res.status})`);
         const data = await res.json();
 
@@ -1505,69 +1866,371 @@ function renderTips(tips) {
 // Stats (Spaced Repetition + Error Pattern)
 // ============================================================
 function updateStats(data) {
-    S.stats.total++;
-    S.stats.sessions++;
-    S.stats.scores.push(data.scores.overall);
-    if (S.stats.scores.length > 50) S.stats.scores = S.stats.scores.slice(-50);
+    // 统计数据全部记录到服务端数据库（跨浏览器同步）
+    // 不再使用 localStorage
+    if (S.sentence) {
+        try {
+            const wordScores = (data.words || []).map(w => ({ word: w.word, accuracy: w.accuracy }));
+            const errors = (data.errors || []).map(e => ({
+                expected: e.expected || '',
+                actual: e.actual || '',
+                type: e.type || 'substitution',
+            }));
 
-    (data.errors || []).forEach(e => {
-        if (e.expected && e.type !== 'insertion') {
-            if (!S.stats.errors[e.expected]) S.stats.errors[e.expected] = 0;
-            S.stats.errors[e.expected]++;
-        }
-    });
+            // Collect pronunciation error words (accuracy < 60)
+            const pronunciationErrorWords = (data.words || [])
+                .filter(w => w.accuracy < 60)
+                .map(w => w.word);
 
-    (data.words || []).forEach(w => {
-        S.stats.words_learned[w.word] = S.stats.words_learned[w.word] || { attempts: 0, best: 0 };
-        S.stats.words_learned[w.word].attempts++;
-        S.stats.words_learned[w.word].best = Math.max(S.stats.words_learned[w.word].best, w.accuracy);
-    });
+            const evalBody = {
+                sentence_id: `sentence_${S.sentence.id}`,
+                overall_score: data.scores?.overall || 0,
+                pronunciation_score: data.scores?.pronunciation || 0,
+                completeness_score: data.scores?.completeness || 0,
+                fluency_score: data.scores?.fluency || 0,
+                errors: errors,
+                word_scores: wordScores,
+                duration: data.fluency_details?.total_duration || 0,
+            };
 
-    saveStats();
+            // Add pronunciation error words if any
+            if (pronunciationErrorWords.length > 0) {
+                evalBody.pronunciation_error_words = pronunciationErrorWords;
+            }
+
+            fetchWithAuth(`${API}/api/learning/record-evaluation`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(evalBody),
+            }).catch(() => {});
+        } catch {}
+    }
 }
 
 function openStats() {
-    const s = S.stats;
-    const avg = s.scores.length ? (s.scores.reduce((a, b) => a + b, 0) / s.scores.length).toFixed(1) : 0;
-    const best = s.scores.length ? Math.max(...s.scores) : 0;
-    const wordsCount = Object.keys(s.words_learned).length;
+    // 先显示加载状态
+    el.statsModalBody.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载统计数据...</div>';
+    el.statsModal.style.display = 'flex';
 
-    const topErrors = Object.entries(s.errors)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
+    // 从服务端加载完整统计数据
+    loadServerStats().then(stats => {
+        if (!stats) {
+            el.statsModalBody.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);">暂无统计数据，开始练习后即可查看</div>';
+            return;
+        }
+        renderStatsContent(stats);
+    });
+}
+
+function renderStatsContent(stats) {
+    const scores = stats.recent_scores || [];
+    const errors = stats.error_phonemes || {};
+    const wordsLearned = stats.words_learned || {};
+    const analytics = stats.analytics || {};
+    const fsrsStats = stats.fsrs_stats || {};
+    const weakness = stats.weakness || stats.analytics?.weakness || S.weaknessProfile;
+
+    const totalPractice = stats.total_practice || 0;
+    const avg = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) : 0;
+    const best = scores.length ? Math.max(...scores) : 0;
+    const wordsCount = Object.keys(wordsLearned).length;
+    const totalErrorCount = Object.values(errors).reduce((a, b) => a + b, 0);
+    const errorPhonemeCount = Object.keys(errors).length;
+
+    // Greeting section
+    const userName = S.user && S.user.id !== 'default' ? (S.user.display_name || S.user.username) : '学习者';
+    const streakBadge = analytics.streak ?
+        `<span class="streak-badge">🔥 ${analytics.streak}天连续学习</span>` : '';
+    const improvementRate = analytics.improvement_rate;
+    const improvementBadge = improvementRate !== undefined && improvementRate !== 0 ?
+        `<span class="improvement-rate ${improvementRate > 0 ? 'positive' : improvementRate < 0 ? 'negative' : 'neutral'}">${improvementRate > 0 ? '↑' : improvementRate < 0 ? '↓' : '→'} ${Math.abs(improvementRate).toFixed(1)}分 ${improvementRate > 0 ? '进步' : '需加油'}</span>` : '';
+
+    // Weakness heatmap
+    let weaknessHTML = '';
+    if (weakness && weakness.phoneme_weaknesses && weakness.phoneme_weaknesses.length > 0) {
+        weaknessHTML = `
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsWeaknessCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                    薄弱音素分析
+                </h4>
+                <div class="stats-section-summary">
+                    <span class="stats-badge warn">${weakness.phoneme_weaknesses.length}个薄弱项</span>
+                    <span class="stats-collapse-arrow" id="statsWeaknessCollapseArrow">▼</span>
+                </div>
+            </div>
+            <div class="stats-section-body" id="statsWeaknessCollapse">
+                <div class="weakness-heatmap">
+                    ${weakness.phoneme_weaknesses.map(w => {
+                        const ipa = ARPABET_TO_IPA[w.phoneme] || w.phoneme;
+                        return `<span class="weakness-chip ${w.severity}" title="${w.phoneme}: 错误率${(w.error_rate*100).toFixed(0)}%, ${w.error_count}次">/${ipa}/</span>`;
+                    }).join('')}
+                </div>
+                <p style="font-size:12px;color:var(--text3);margin-top:8px;">红色=严重困难 黄色=中等困难 蓝色=轻微困难</p>
+            </div>
+        </div>`;
+    }
+
+    // Recommendation
+    let recommendationHTML = '';
+    if (weakness && weakness.difficulty_level) {
+        const diffLabel = {easy: '简单', medium: '中等', hard: '困难'}[weakness.difficulty_level] || weakness.difficulty_level;
+        recommendationHTML = `
+        <div class="stats-recommendation">
+            <h5>💡 今日建议</h5>
+            <p>根据你的学习表现，推荐练习<strong>${diffLabel}</strong>难度的句子。${weakness.word_weaknesses?.length > 0 ? `重点关注：${weakness.word_weaknesses.slice(0,5).map(w=>w.word).join('、')}` : ''}</p>
+        </div>`;
+    }
+
+    // Error phonemes: full list sorted by frequency
+    const allErrors = Object.entries(errors)
+        .sort((a, b) => b[1] - a[1]);
+
+    // Top 5 for summary
+    const topErrorsSummary = allErrors.slice(0, 5)
         .map(([p, c]) => {
             const ipa = ARPABET_TO_IPA[p] || p;
             return `/${ipa}/ (${c}次)`;
         })
         .join('、') || '暂无';
 
-    const weakWords = Object.entries(s.words_learned)
-        .filter(([_, d]) => d.best < 70)
-        .map(([w, d]) => w)
-        .slice(0, 10);
+    // Weak words: words that have errors, low score, or are learning/relearning/due in FSRS
+    const allWeakWords = Object.entries(wordsLearned)
+        .filter(([_, d]) => {
+            // 有 FSRS 数据的：非 mastered 状态
+            if (d.fsrs_mastery) return d.fsrs_mastery !== 'mastered';
+            // 有练习数据的：分数低于 70%
+            if (d.attempts > 0) return d.best < 70;
+            // 只有错误记录的
+            return (d.dictation_errors > 0 || d.pronunciation_errors > 0);
+        })
+        .sort((a, b) => a[1].best - b[1].best);
+
+    // Mastered words: FSRS mastered OR (high score AND no FSRS or FSRS mastered)
+    const masteredWords = Object.entries(wordsLearned)
+        .filter(([_, d]) => {
+            // FSRS 标记为已掌握
+            if (d.fsrs_mastery === 'mastered') return true;
+            // 没有 FSRS 数据但发音分数高
+            if (!d.fsrs_mastery && d.best >= 80 && d.attempts > 0) return true;
+            return false;
+        });
+
+    // Score trend (last 10)
+    const recentScores = scores.slice(0, 10);
+    const scoreTrend = recentScores.length >= 2
+        ? (recentScores[0] >= recentScores[recentScores.length - 1] ? '📈 上升趋势' : '📉 下降趋势')
+        : '';
+
+    // Build error phoneme detail HTML
+    const errorDetailId = 'statsErrorDetail';
+    const errorShowMoreId = 'statsErrorShowMore';
+    const errorInitiallyShown = 5;
+    let errorDetailHTML = '';
+    if (allErrors.length === 0) {
+        errorDetailHTML = '<p style="font-size:13px;color:var(--text3);padding:8px 0;">还没有发音错误记录，继续保持！</p>';
+    } else {
+        errorDetailHTML = allErrors.map(([p, c], i) => {
+            const ipa = ARPABET_TO_IPA[p] || p;
+            const severity = c >= 5 ? 'high' : c >= 3 ? 'medium' : 'low';
+            const severityColor = c >= 5 ? 'var(--err)' : c >= 3 ? 'var(--warn)' : 'var(--pri)';
+            const barWidth = Math.min(100, (c / (allErrors[0][1] || 1)) * 100);
+            const hidden = i >= errorInitiallyShown ? ' style="display:none;"' : '';
+            return `<div class="error-detail-item" data-index="${i}"${hidden}>
+                <div class="error-detail-header">
+                    <span class="error-detail-ipa">/${ipa}/</span>
+                    <span class="error-detail-arpabet">${p}</span>
+                    <span class="error-detail-count" style="color:${severityColor};">${c}次</span>
+                </div>
+                <div class="error-detail-bar">
+                    <div class="error-detail-bar-fill" style="width:${barWidth}%;background:${severityColor};"></div>
+                </div>
+            </div>`;
+        }).join('');
+
+        if (allErrors.length > errorInitiallyShown) {
+            errorDetailHTML += `<button id="${errorShowMoreId}" class="stats-show-more" onclick="toggleStatsSection('${errorDetailId}', ${errorInitiallyShown}, ${allErrors.length}, '${errorShowMoreId}')">
+                显示全部 ${allErrors.length} 个出错音素
+            </button>`;
+        }
+    }
+
+    // Build weak words detail HTML
+    const weakDetailId = 'statsWeakDetail';
+    const weakShowMoreId = 'statsWeakShowMore';
+    const weakInitiallyShown = 8;
+    let weakDetailHTML = '';
+    if (allWeakWords.length === 0) {
+        weakDetailHTML = '<p style="font-size:13px;color:var(--text3);padding:8px 0;">所有单词掌握良好！</p>';
+    } else {
+        weakDetailHTML = allWeakWords.map(([w, d], i) => {
+            const barColor = d.best >= 50 ? 'var(--warn)' : 'var(--err)';
+            const hidden = i >= weakInitiallyShown ? ' style="display:none;"' : '';
+            return `<div class="weak-word-item" data-index="${i}"${hidden}>
+                <span class="weak-word-name">${w}</span>
+                <div class="weak-word-bar"><div class="weak-word-bar-fill" style="width:${d.best}%;background:${barColor};"></div></div>
+                <span class="weak-word-score" style="color:${barColor};">${d.best}%</span>
+                <span class="weak-word-attempts">${d.attempts}次</span>
+            </div>`;
+        }).join('');
+
+        if (allWeakWords.length > weakInitiallyShown) {
+            weakDetailHTML += `<button id="${weakShowMoreId}" class="stats-show-more" onclick="toggleStatsSection('${weakDetailId}', ${weakInitiallyShown}, ${allWeakWords.length}, '${weakShowMoreId}')">
+                显示全部 ${allWeakWords.length} 个待复习单词
+            </button>`;
+        }
+    }
 
     el.statsModalBody.innerHTML = `
+        <div class="stats-greeting">
+            <h4>👋 你好，${userName}！</h4>
+            <p>${streakBadge} ${improvementBadge}</p>
+        </div>
+
+        ${recommendationHTML}
+
         <div class="stats-grid">
-            <div class="stat-card"><div class="sc-val">${s.total}</div><div class="sc-label">练习次数</div></div>
+            <div class="stat-card"><div class="sc-val">${totalPractice}</div><div class="sc-label">练习次数</div></div>
             <div class="stat-card"><div class="sc-val">${avg}</div><div class="sc-label">平均分</div></div>
             <div class="stat-card"><div class="sc-val">${best}</div><div class="sc-label">最高分</div></div>
             <div class="stat-card"><div class="sc-val">${wordsCount}</div><div class="sc-label">已学单词</div></div>
         </div>
+
+        ${scoreTrend ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0fdf4;border-radius:8px;text-align:center;font-size:13px;font-weight:600;color:#166534;">
+            ${scoreTrend}（最近${recentScores.length}次）
+        </div>` : ''}
+
         ${S.pendingReviewCount > 0 ? `
-        <div style="margin-bottom:12px;padding:12px;background:#eef2ff;border-radius:8px;text-align:center;">
+        <div style="margin-bottom:12px;padding:12px;background:#eef2ff;border-radius:8px;text-align:center;cursor:pointer;" onclick="loadSentence()">
             <span style="font-size:14px;font-weight:700;color:var(--pri);">${S.pendingReviewCount} 句待复习</span>
+            <span style="font-size:12px;color:var(--text3);margin-left:8px;">点击练习</span>
         </div>` : ''}
-        <div class="error-pattern">
-            <h4>最常出错音素</h4>
-            <p>${topErrors}</p>
+        ${S.pendingWordReviewCount > 0 ? `
+        <div style="margin-bottom:12px;padding:12px;background:#fef3e2;border-radius:8px;text-align:center;cursor:pointer;" onclick="openWordReview()">
+            <span style="font-size:14px;font-weight:700;color:var(--warn);">${S.pendingWordReviewCount} 词待复习</span>
+            <span style="font-size:12px;color:var(--text3);margin-left:8px;">点击复习</span>
+        </div>` : ''}
+
+        ${weaknessHTML}
+
+        <!-- 发音错误统计 -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsErrorCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--err)" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    发音错误统计
+                </h4>
+                <div class="stats-section-summary">
+                    ${errorPhonemeCount > 0 ? `<span class="stats-badge error">${errorPhonemeCount}个音素</span><span class="stats-badge error">${totalErrorCount}次错误</span>` : '<span class="stats-badge ok">零错误</span>'}
+                    <span class="stats-collapse-arrow" id="statsErrorCollapseArrow">▼</span>
+                </div>
+            </div>
+            <div class="stats-section-body" id="statsErrorCollapse">
+                ${errorPhonemeCount > 0 ? `<div class="stats-summary-bar">
+                    最频繁：${topErrorsSummary}
+                </div>` : ''}
+                <div id="${errorDetailId}">
+                    ${errorDetailHTML}
+                </div>
+            </div>
         </div>
-        ${weakWords.length ? `
-        <div style="margin-top:12px;padding:12px;background:#fef3c7;border-radius:8px;">
-            <h4 style="font-size:13px;color:#92400e;margin-bottom:6px;">需要复习的单词</h4>
-            <p style="font-size:12px;color:#92400e;">${weakWords.map(w => `<span style="display:inline-block;padding:2px 8px;margin:2px;background:#fde68a;border-radius:4px;font-weight:600;">${w}</span>`).join('')}</p>
-        </div>` : ''}
+
+        <!-- 单词掌握情况 -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsWordsCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                    单词掌握情况
+                </h4>
+                <div class="stats-section-summary">
+                    ${stats.word_review_stats ? `<span class="stats-badge ok">${stats.word_review_stats.mastered || 0}已掌握</span><span class="stats-badge warn">${stats.word_review_stats.due || 0}待复习</span>` : ''}
+                    ${masteredWords.length > 0 ? `<span class="stats-badge ok">${masteredWords.length}发音达标</span>` : ''}
+                    ${allWeakWords.length > 0 ? `<span class="stats-badge warn">${allWeakWords.length}待加强</span>` : ''}
+                    <span class="stats-collapse-arrow" id="statsWordsCollapseArrow">▼</span>
+                </div>
+            </div>
+            <div class="stats-section-body" id="statsWordsCollapse">
+                ${allWeakWords.length > 0 ? `
+                <div class="stats-sub-title">需要加强的单词</div>
+                <div id="${weakDetailId}">
+                    ${weakDetailHTML}
+                </div>
+                ` : '<p style="font-size:13px;color:var(--text3);padding:8px 0;">所有单词掌握良好！</p>'}
+
+                ${masteredWords.length > 0 ? `
+                <div class="stats-sub-title" style="margin-top:14px;">已掌握的单词</div>
+                <div class="mastered-words-grid">
+                    ${masteredWords.slice(0, 20).map(([w, d]) =>
+                        `<span class="mastered-word">${w}</span>`
+                    ).join('')}
+                    ${masteredWords.length > 20 ? `<span class="mastered-word-more">+${masteredWords.length - 20}个</span>` : ''}
+                </div>
+                ` : ''}
+            </div>
+        </div>
+
+        <!-- 最近得分 -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsProgressCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    最近得分
+                </h4>
+                <span class="stats-collapse-arrow" id="statsProgressCollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsProgressCollapse">
+                ${scores.length > 0 ? `
+                <div class="score-history">
+                    ${scores.slice(0, 20).reverse().map((score, i) => {
+                        const color = score >= 80 ? 'var(--ok)' : score >= 60 ? 'var(--pri)' : score >= 40 ? 'var(--warn)' : 'var(--err)';
+                        const height = Math.max(4, score);
+                        return `<div class="score-bar-item" title="${score}分">
+                            <div class="score-bar-fill" style="height:${height}%;background:${color};"></div>
+                        </div>`;
+                    }).join('')}
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-top:4px;">
+                    <span>较早</span><span>最近</span>
+                </div>
+                ` : '<p style="font-size:13px;color:var(--text3);padding:8px 0;">暂无得分记录</p>'}
+            </div>
+        </div>
     `;
-    el.statsModal.style.display = 'flex';
+}
+
+// Toggle show more/less in stats sections
+function toggleStatsSection(containerId, initialCount, totalCount, buttonId) {
+    const container = document.getElementById(containerId);
+    const button = document.getElementById(buttonId);
+    if (!container || !button) return;
+
+    const items = container.querySelectorAll('[data-index]');
+    const isExpanded = button.textContent.includes('收起');
+
+    items.forEach(item => {
+        const idx = parseInt(item.dataset.index);
+        if (isExpanded) {
+            item.style.display = idx >= initialCount ? 'none' : '';
+        } else {
+            item.style.display = '';
+        }
+    });
+
+    button.textContent = isExpanded
+        ? `显示全部 ${totalCount} 项`
+        : '收起';
+}
+
+// Toggle collapse for stats sections
+function toggleStatsCollapse(sectionId) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    const isCollapsed = section.classList.contains('stats-collapsed');
+    section.classList.toggle('stats-collapsed', !isCollapsed);
+    const arrowId = sectionId.replace('Collapse', 'CollapseArrow');
+    const arrow = document.getElementById(arrowId);
+    if (arrow) arrow.style.transform = isCollapsed ? '' : 'rotate(-90deg)';
 }
 
 // ============================================================
@@ -1645,6 +2308,395 @@ window.pronouncePhonemeGuide = pronouncePhonemeGuide;
 // Resize
 // ============================================================
 window.addEventListener('resize', initCanvas);
+
+// ============================================================
+// Learning Mode Management
+// ============================================================
+function loadLearningMode() {
+    try {
+        const saved = localStorage.getItem('phonos_learning_mode');
+        if (saved === 'sequential' || saved === 'smart') {
+            S.learningMode = saved;
+        }
+    } catch {}
+    updateModeSelectorUI();
+}
+
+function saveLearningMode(mode) {
+    S.learningMode = mode;
+    try {
+        localStorage.setItem('phonos_learning_mode', mode);
+    } catch {}
+    updateModeSelectorUI();
+}
+
+function updateModeSelectorUI() {
+    if (el.btnModeSmart && el.btnModeSequential && el.btnModeSettings) {
+        if (S.learningMode === 'sequential') {
+            el.btnModeSequential.classList.add('active');
+            el.btnModeSmart.classList.remove('active');
+            el.btnModeSettings.style.display = '';
+        } else {
+            el.btnModeSmart.classList.add('active');
+            el.btnModeSequential.classList.remove('active');
+            el.btnModeSettings.style.display = 'none';
+        }
+    }
+}
+
+async function fetchModeStatus() {
+    try {
+        const r = await fetchWithAuth(`${API}/api/mode/status`);
+        if (r.ok) {
+            S.modeStatus = await r.json();
+            // Update ID range dialog info
+            if (el.idRangeInfo && S.modeStatus) {
+                const total = S.modeStatus.sentences_count || S.modeStatus.stored_sentences_count || 0;
+                el.idRangeInfo.textContent = `共 ${total} 句`;
+            }
+        }
+    } catch { /* ignore */ }
+}
+
+function switchLearningMode(mode) {
+    if (mode === S.learningMode) return;
+    saveLearningMode(mode);
+    // Reload sentence with new mode
+    loadSentence();
+}
+
+// ============================================================
+// Data Change Detection
+// ============================================================
+function showDataChangeBanner() {
+    if (el.dataChangeBanner) {
+        el.dataChangeBanner.style.display = 'flex';
+    }
+    // Auto-open ID range dialog if in sequential mode
+    if (S.learningMode === 'sequential') {
+        openIdRangeDialog();
+    }
+}
+
+function hideDataChangeBanner() {
+    if (el.dataChangeBanner) {
+        el.dataChangeBanner.style.display = 'none';
+    }
+}
+
+// ============================================================
+// Sequential Mode ID Range Dialog
+// ============================================================
+function openIdRangeDialog() {
+    if (!el.idRangeModal) return;
+    el.idRangeError.style.display = 'none';
+
+    // Populate current values from modeStatus
+    if (S.modeStatus) {
+        const total = S.modeStatus.sentences_count || S.modeStatus.stored_sentences_count || 0;
+        el.idRangeInfo.textContent = `共 ${total} 句`;
+        if (S.modeStatus.start_id) el.idRangeStart.value = S.modeStatus.start_id;
+        if (S.modeStatus.end_id) el.idRangeEnd.value = S.modeStatus.end_id;
+        else el.idRangeEnd.value = '';
+    }
+
+    el.idRangeModal.style.display = 'flex';
+}
+
+async function confirmIdRange() {
+    const startId = parseInt(el.idRangeStart.value);
+    const endId = el.idRangeEnd.value ? parseInt(el.idRangeEnd.value) : null;
+
+    // Validate
+    if (!startId || startId < 1) {
+        el.idRangeError.textContent = '起始ID必须大于0';
+        el.idRangeError.style.display = '';
+        return;
+    }
+    if (endId !== null && endId < startId) {
+        el.idRangeError.textContent = '结束ID不能小于起始ID';
+        el.idRangeError.style.display = '';
+        return;
+    }
+
+    try {
+        const body = { start_id: startId };
+        if (endId !== null) body.end_id = endId;
+
+        const r = await fetchWithAuth(`${API}/api/mode/sequential/set-range`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+
+        if (r.ok) {
+            // Update cached mode status
+            S.modeStatus = S.modeStatus || {};
+            S.modeStatus.start_id = startId;
+            S.modeStatus.end_id = endId;
+            // Close dialog and hide banner
+            el.idRangeModal.style.display = 'none';
+            hideDataChangeBanner();
+            // Load next sentence in range
+            loadSentence();
+        } else {
+            const d = await r.json().catch(() => ({}));
+            el.idRangeError.textContent = d.detail || '设置范围失败';
+            el.idRangeError.style.display = '';
+        }
+    } catch (e) {
+        el.idRangeError.textContent = '网络错误，请重试';
+        el.idRangeError.style.display = '';
+    }
+}
+
+// ============================================================
+// Word Review
+// ============================================================
+async function openWordReview() {
+    if (!el.wordReviewModal) return;
+    el.wordReviewModal.style.display = 'flex';
+    el.wordReviewCards.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载复习队列...</div>';
+    el.wordReviewEmpty.style.display = 'none';
+
+    // 重置复习状态
+    S.wordReviewQueue = [];
+    S.wordReviewIndex = 0;
+    S.wordReviewTotal = 20;  // 每次最多20个
+    S.wordReviewReviewed = 0;
+    S.wordReviewCorrect = 0;
+
+    // 加载第一个单词（FSRS 推荐）
+    await loadNextReviewWord();
+}
+
+async function loadNextReviewWord() {
+    const idx = S.wordReviewReviewed;
+    const total = S.wordReviewTotal;
+
+    if (idx >= total) {
+        // 达到本次复习上限
+        renderWordReviewComplete();
+        return;
+    }
+
+    el.wordReviewProgress.textContent = `${idx}/${total} 复习完成`;
+
+    try {
+        const r = await fetchWithAuth(`${API}/api/words/next-review`);
+        if (r.ok) {
+            const data = await r.json();
+            if (!data.word) {
+                // 没有更多需要复习的单词
+                renderWordReviewComplete();
+                return;
+            }
+            S.currentReviewWord = data;
+            S.wordReviewStats = data.review_stats || null;
+            renderSingleWordReviewCard(data);
+        } else {
+            el.wordReviewCards.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);">加载失败</div>';
+        }
+    } catch {
+        el.wordReviewCards.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);">网络错误</div>';
+    }
+}
+
+function renderSingleWordReviewCard(data) {
+    const idx = S.wordReviewReviewed;
+    const total = S.wordReviewTotal;
+    const dictErrors = data.dictation_errors || 0;
+    const pronErrors = data.pronunciation_errors || 0;
+    const fsrsState = data.fsrs_state || 'new';
+    const fsrsDifficulty = data.fsrs_difficulty || 0;
+    const fsrsReps = data.fsrs_reps || 0;
+    const fsrsRetrievability = data.fsrs_retrievability || 0;
+    const fsrsScheduledDays = data.fsrs_scheduled_days || 0;
+
+    // 掌握度标签
+    const masteryMap = {
+        'new': { label: '未学习', color: '#888', bg: '#f0f0f0' },
+        'learning': { label: '学习中', color: '#e67e22', bg: '#fef3e2' },
+        'review': { label: '复习中', color: '#3498db', bg: '#e8f4fd' },
+        'relearning': { label: '重新学习', color: '#e74c3c', bg: '#fde8e8' },
+        'due': { label: '待复习', color: '#e67e22', bg: '#fef3e2' },
+        'mastered': { label: '已掌握', color: '#27ae60', bg: '#e8f8f0' },
+    };
+    const mastery = masteryMap[fsrsState] || masteryMap['new'];
+
+    // 可回忆率条
+    const retPercent = Math.round(fsrsRetrievability * 100);
+    const retColor = retPercent >= 80 ? '#27ae60' : retPercent >= 50 ? '#e67e22' : '#e74c3c';
+
+    // 复习统计
+    const stats = S.wordReviewStats || {};
+    const statsHTML = stats.total > 0 ? `
+        <div class="word-review-stats-bar">
+            <span class="word-review-stat-item">总计 <strong>${stats.total}</strong></span>
+            <span class="word-review-stat-item" style="color:#27ae60">已掌握 <strong>${stats.mastered || 0}</strong></span>
+            <span class="word-review-stat-item" style="color:#e67e22">待复习 <strong>${stats.due || 0}</strong></span>
+            <span class="word-review-stat-item" style="color:#888">新词 <strong>${stats.new || 0}</strong></span>
+        </div>
+    ` : '';
+
+    let html = `
+    <div class="word-review-card" id="wordReviewCurrentCard">
+        <div class="word-review-card-header">
+            <span class="word-review-card-word">${data.word || ''}</span>
+            <span class="word-review-card-pos">${data.pos || ''}</span>
+            <span class="word-review-mastery-badge" style="background:${mastery.bg};color:${mastery.color}">${mastery.label}</span>
+        </div>
+        ${data.ipa ? `<div class="word-review-card-ipa">/${data.ipa}/</div>` : ''}
+        <div class="word-review-card-meaning">${data.meaning || ''}</div>
+        
+        <!-- FSRS 掌握度信息 -->
+        <div class="word-review-fsrs-info">
+            ${fsrsReps > 0 ? `
+            <div class="word-review-progress-bar">
+                <div class="word-review-progress-label">
+                    <span>可回忆率</span>
+                    <span style="color:${retColor};font-weight:600">${retPercent}%</span>
+                </div>
+                <div class="word-review-progress-track">
+                    <div class="word-review-progress-fill" style="width:${retPercent}%;background:${retColor}"></div>
+                </div>
+            </div>
+            <div class="word-review-fsrs-details">
+                <span>复习 ${fsrsReps} 次</span>
+                <span>难度 ${fsrsDifficulty.toFixed(1)}</span>
+                ${fsrsScheduledDays > 0 ? `<span>间隔 ${fsrsScheduledDays.toFixed(0)}天</span>` : ''}
+            </div>` : '<div class="word-review-fsrs-details"><span>首次学习</span></div>'}
+        </div>
+        
+        ${(dictErrors > 0 || pronErrors > 0) ? `
+        <div class="word-review-card-errors">
+            ${dictErrors > 0 ? `<span class="word-review-error-badge dictation">听写×${dictErrors}</span>` : ''}
+            ${pronErrors > 0 ? `<span class="word-review-error-badge pronunciation">发音×${pronErrors}</span>` : ''}
+        </div>` : ''}
+        
+        <div class="word-review-rating">
+            <button class="word-review-rating-btn r1" data-rating="1">
+                忘了
+                <span class="word-review-rating-label">Again</span>
+            </button>
+            <button class="word-review-rating-btn r2" data-rating="2">
+                难
+                <span class="word-review-rating-label">Hard</span>
+            </button>
+            <button class="word-review-rating-btn r3" data-rating="3">
+                模糊
+                <span class="word-review-rating-label">Good</span>
+            </button>
+            <button class="word-review-rating-btn r4" data-rating="4">
+                会了
+                <span class="word-review-rating-label">Easy</span>
+            </button>
+        </div>
+    </div>
+    ${statsHTML}`;
+
+    el.wordReviewCards.innerHTML = html;
+    el.wordReviewProgress.textContent = `${idx}/${total} 复习完成`;
+
+    // Bind rating buttons
+    el.wordReviewCards.querySelectorAll('.word-review-rating-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const rating = parseInt(btn.dataset.rating);
+            submitWordReviewRatingSingle(rating);
+        });
+    });
+}
+
+function renderWordReviewComplete() {
+    const reviewed = S.wordReviewReviewed;
+    const total = S.wordReviewTotal;
+    el.wordReviewProgress.textContent = `${reviewed}/${total} 复习完成`;
+    
+    const stats = S.wordReviewStats || {};
+    el.wordReviewCards.innerHTML = `
+        <div style="text-align:center;padding:30px 20px;">
+            <div style="font-size:32px;margin-bottom:12px;">🎉</div>
+            <div style="font-size:16px;font-weight:700;color:var(--ok);margin-bottom:8px;">
+                本次复习完成！
+            </div>
+            <div style="font-size:13px;color:var(--text2);">
+                已复习 ${reviewed} 个单词
+            </div>
+            ${stats.total > 0 ? `
+            <div style="margin-top:16px;padding:12px;background:var(--bg2);border-radius:8px;font-size:13px;">
+                <div>总计 ${stats.total} 词 | 已掌握 ${stats.mastered || 0} | 待复习 ${stats.due || 0} | 新词 ${stats.new || 0}</div>
+            </div>` : ''}
+        </div>`;
+}
+
+async function submitWordReviewRatingSingle(rating) {
+    const data = S.currentReviewWord;
+    if (!data || !data.word) return;
+
+    // Animate card fading out
+    const card = document.getElementById('wordReviewCurrentCard');
+    if (card) card.classList.add('fading');
+
+    // Submit to backend
+    try {
+        await fetchWithAuth(`${API}/api/words/review`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                word: data.word,
+                rating: rating,
+            }),
+        });
+    } catch { /* still advance */ }
+
+    // Track progress
+    S.wordReviewReviewed++;
+    if (rating >= 3) S.wordReviewCorrect++;
+
+    // Load next word
+    setTimeout(() => {
+        loadNextReviewWord();
+    }, 300);
+}
+
+// ============================================================
+// Auto-record Dictation Errors
+// ============================================================
+async function recordDictationErrors(inputs, expectedWords) {
+    if (!S.sentence) return;
+
+    const errorWords = [];
+    inputs.forEach((input, i) => {
+        if (input.classList.contains('incorrect')) {
+            const userVal = input.value.trim().toLowerCase();
+            const expected = expectedWords[i] || '';
+            if (userVal && expected) {
+                errorWords.push({
+                    word: expected,
+                    user_input: userVal,
+                });
+            }
+        }
+    });
+
+    if (errorWords.length === 0) return;
+
+    // Send to backend (fire-and-forget)
+    try {
+        await fetchWithAuth(`${API}/api/dictation/record-errors`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                error_words: errorWords,
+                sentence_id: S.sentence.id,
+            }),
+        });
+    } catch { /* ignore */ }
+}
+
+// ============================================================
+// Auto-record Pronunciation Errors (enhanced in updateStats)
+// ============================================================
 
 // ============================================================
 // Boot

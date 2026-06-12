@@ -1,20 +1,26 @@
 """
-动态词典服务 - 使用 ENDICT 进行单词查询
+动态词典服务 - 使用 ENDICT 高频词 + 免费网络API回退
 
 数据源优先级：
-1. ENDICT common.json（5万高频词，内存缓存，含英美音标、释义、例句）
-2. ENDICT full_dict.json（128万词，延迟加载，按需查询）
-3. 内置基础词典（phoneme_data.WORD_DICT）
-4. G2P 自动解析
+1. ENDICT common.json（5万高频词，延迟加载，含英美音标、释义、例句）
+2. 免费网络翻译API（MyMemory等，查不到的词自动回退）
+3. G2P 自动解析（生成音标）
 
-在线查询已禁用（太慢），仅使用本地数据
+优化点：
+- 不加载完整词典(full_dict 136MB)，精简版足够
+- common.json 延迟加载（首次查询时才读取）
+- 网络API异步查询，不阻塞主流程
+- 查询结果缓存，避免重复请求
 """
 
 import json
 import os
 import re
+import aiohttp
+import asyncio
 from pathlib import Path
 from typing import Optional, Dict
+from functools import lru_cache
 
 _DATA_DIR = Path(__file__).parent
 _DICT_DIR = _DATA_DIR / "dict"
@@ -22,41 +28,36 @@ _DICT_DIR = _DATA_DIR / "dict"
 # ENDICT 数据目录
 _ENDICT_DIR = _DICT_DIR / "endict"
 _ENDICT_COMMON = _ENDICT_DIR / "common.json"
-_ENDICT_FULL = _ENDICT_DIR / "full_dict.json"
 
 _dict_instance = None
 
+# Free translation API URLs
+_MYMEMORY_API = "https://api.mymemory.translated.net/get"
+
 
 class DictService:
-    """动态词典查询服务"""
+    """动态词典查询服务（精简版 + 网络API回退）"""
 
     def __init__(self):
         self._endict_common: Dict = {}
-        self._endict_full: Dict = {}
         self._common_loaded = False
-        self._full_loaded = False
         self._common_available = False
-        self._full_available = False
         # 单词详情缓存（避免重复查询）
         self._lookup_cache: Dict = {}
+        # 网络 API 缓存（已查询过的词不再重复请求）
+        self._api_cache: Dict = {}
+        # aiohttp session (lazy init)
+        self._http_session: Optional[aiohttp.ClientSession] = None
 
-        # 检查 ENDICT common.json（5万高频词，内存友好）
+        # 检查 ENDICT common.json
         if _ENDICT_COMMON.exists() and _ENDICT_COMMON.stat().st_size > 100:
             self._common_available = True
             print(f"[词典] ENDICT 高频词库可用: {_ENDICT_COMMON.name}")
-
-        # 检查 ENDICT full_dict.json（完整词典，按需加载）
-        if _ENDICT_FULL.exists() and _ENDICT_FULL.stat().st_size > 100:
-            self._full_available = True
-            print(f"[词典] ENDICT 完整词典可用: {_ENDICT_FULL.name}")
-
-        if not self._common_available and not self._full_available:
-            print("[词典] 未找到 ENDICT 数据，将使用内置词典 + G2P 解析")
-            print("[词典] 提示：下载 ENDICT 数据到 backend/dict/endict/ 目录")
-            print("[词典]   ENDICT: https://github.com/ismartcoding/endict")
+        else:
+            print("[词典] 未找到 ENDICT common.json，将使用网络API + G2P 解析")
 
     def _ensure_common(self):
-        """延迟加载 ENDICT 高频词库（约14MB，可常驻内存）"""
+        """延迟加载 ENDICT 高频词库（约14MB，首次查询时才加载）"""
         if self._common_loaded:
             return
         self._common_loaded = True
@@ -70,80 +71,13 @@ class DictService:
         except Exception as e:
             print(f"[词典] ENDICT 高频词库加载失败: {e}")
 
-    def _ensure_full(self):
-        """延迟标记 ENDICT 完整词典可用
-
-        不再一次性加载136MB的完整词典到内存（会导致OOM），
-        改为按需通过 _lookup_full_streaming 逐行查找。
-        """
-        if self._full_loaded:
-            return
-        self._full_loaded = True
-        if not self._full_available:
-            return
-        # Don't load the full dict into memory - just mark it available
-        print(f"[词典] ENDICT 完整词典可用（按需查询，不预加载）")
-
-    def _lookup_full_streaming(self, word: str) -> Optional[dict]:
-        """在完整词典中逐行查找单词（避免一次性加载136MB到内存）
-
-        使用 ijson 或手动解析 JSON 逐条查找
-        """
-        if not _ENDICT_FULL.exists():
-            return None
-
-        word_lower = word.lower()
-
-        try:
-            # Method 1: Try ijson for efficient streaming
-            try:
-                import ijson
-                with open(_ENDICT_FULL, "rb") as f:
-                    for entry in ijson.items(f, "item"):
-                        if isinstance(entry, dict):
-                            entry_word = entry.get("word", "").lower()
-                            if entry_word == word_lower:
-                                return entry
-                            # Early exit: JSON keys are sorted, if we've passed the target, stop
-                            # (But ijson items doesn't guarantee order, so we can't early-exit)
-                return None
-            except ImportError:
-                pass
-
-            # Method 2: Manual line-by-line parsing (full_dict.json is one large JSON object)
-            # Since loading the entire file is too expensive, we do a grep-like search
-            import subprocess
-            result = subprocess.run(
-                ["grep", "-m1", "-i", f'"{word_lower}"', str(_ENDICT_FULL)],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # This is a rough approach - the grep result might not be valid JSON
-                # Try to find the entry in the line
-                line = result.stdout.strip()
-                # For a proper JSON dict, we'd need the surrounding context
-                # This approach is fragile, so we fall through to not loading
-                pass
-
-            # Method 3: Just don't use full dict - the common dict covers 50K words
-            # which is sufficient for most use cases
-            return None
-
-        except Exception as e:
-            print(f"[词典] 完整词典查询失败: {e}")
-            return None
-
     def lookup_endict(self, word: str) -> Optional[dict]:
-        """从 ENDICT 本地数据查找单词（先查高频词库，再查完整词典）"""
+        """从 ENDICT 本地数据查找单词（仅查高频词库）"""
         word_lower = word.lower()
 
-        # 先查高频词库
+        # 查高频词库
         self._ensure_common()
         data = self._endict_common.get(word_lower)
-
-        # 如果高频词库没有，查完整词典（按需查询，不预加载到内存）
-        if not data and self._full_available:
-            data = self._lookup_full_streaming(word_lower)
 
         if not data:
             return None
@@ -167,13 +101,51 @@ class DictService:
 
         return result
 
+    async def _lookup_web_api(self, word: str) -> Optional[dict]:
+        """通过免费网络API查询单词翻译（异步，不阻塞）"""
+        word_lower = word.lower()
+
+        # 检查缓存
+        if word_lower in self._api_cache:
+            return self._api_cache[word_lower]
+
+        try:
+            if self._http_session is None:
+                self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+
+            # MyMemory 免费翻译API（无需key，每月1万次）
+            url = f"{_MYMEMORY_API}?q={word}&langpair=en|zh"
+            async with self._http_session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    translated = data.get("responseData", {}).get("translatedText", "")
+                    if translated and translated.lower() != word_lower and translated != "NO QUERY SPECIFIED":
+                        result = {
+                            "word": word,
+                            "pos": "",
+                            "meaning": translated,
+                            "ipa_us": "",
+                            "ipa_uk": "",
+                            "arpabet": [],
+                            "example": "",
+                            "examples": [],
+                            "source": "web-api",
+                        }
+                        self._api_cache[word_lower] = result
+                        return result
+        except Exception:
+            pass  # 网络 API 失败不阻塞，静默回退
+
+        self._api_cache[word_lower] = None  # 标记已查过但无结果
+        return None
+
     def lookup(self, word: str, local_only: bool = True) -> dict:
         """
-        查询单词，按优先级依次尝试各词典
+        同步查询单词（仅本地数据，快速返回）
 
         参数:
             word: 要查询的单词
-            local_only: 仅使用本地数据（默认True，避免在线查询阻塞）
+            local_only: 仅使用本地数据（默认True，避免阻塞）
 
         返回格式:
         {
@@ -204,30 +176,7 @@ class DictService:
             self._lookup_cache[word_clean] = result
             return result
 
-        # 2. 内置词典
-        from phoneme_data import WORD_DICT
-        built_in = WORD_DICT.get(word_clean)
-        if built_in:
-            result = {
-                "word": word_clean,
-                "pos": built_in.get("pos", ""),
-                "meaning": built_in.get("meaning", ""),
-                "ipa": built_in.get("ipa", ""),
-                "ipa_us": built_in.get("ipa", ""),
-                "ipa_uk": "",
-                "arpabet": built_in.get("arpabet", []),
-                "example": built_in.get("example", ""),
-                "examples": [],
-                "frequency": built_in.get("frequency", 0),
-                "difficulty": built_in.get("difficulty", 0),
-                "memory_tip": built_in.get("memory_tip", ""),
-                "grammar_note": built_in.get("grammar_note", ""),
-                "source": "builtin",
-            }
-            self._lookup_cache[word_clean] = result
-            return result
-
-        # 3. G2P 自动解析
+        # 2. G2P 自动解析（快速，本地）
         from g2p_service import get_g2p_service
         g2p = get_g2p_service()
         arpabet = g2p.text_to_phonemes(word_clean)
@@ -247,6 +196,34 @@ class DictService:
         }
         self._lookup_cache[word_clean] = result
         return result
+
+    async def lookup_async(self, word: str) -> dict:
+        """
+        异步查询单词（本地 + 网络API回退）
+
+        先查本地，如果本地没有翻译，再查网络API补充释义
+        """
+        # 先走同步查询（本地数据）
+        result = self.lookup(word, local_only=True)
+
+        # 如果本地没有翻译，尝试网络API
+        if not result.get("meaning") and result.get("source") == "g2p":
+            web_result = await self._lookup_web_api(word)
+            if web_result and web_result.get("meaning"):
+                # 合并网络API结果到本地结果（保留G2P生成的音标）
+                result["meaning"] = web_result["meaning"]
+                result["source"] = "g2p+web-api"
+                # 更新缓存
+                word_clean = re.sub(r'[^a-zA-Z\'-]', '', word.lower())
+                self._lookup_cache[word_clean] = result
+
+        return result
+
+    async def close(self):
+        """关闭HTTP会话"""
+        if self._http_session:
+            await self._http_session.close()
+            self._http_session = None
 
 
 def get_dict_service() -> DictService:
