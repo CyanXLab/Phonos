@@ -279,6 +279,33 @@ body {
     color:var(--err);
     text-decoration:line-through;
 }
+.dict-input.incorrect.partial {
+    border-bottom-color:#e67e22;
+    background:rgba(230,126,34,0.06);
+    color:#e67e22;
+    text-decoration:none;
+}
+.dict-input.near-correct {
+    border-bottom-color:#f0ad4e;
+    background:rgba(240,173,78,0.06);
+}
+.dict-input.order-error {
+    border-bottom-color:#8b5cf6;
+    background:rgba(139,92,246,0.08);
+    color:#8b5cf6;
+    text-decoration:underline wavy #8b5cf6;
+    text-underline-offset:4px;
+}
+.dict-input.deletion {
+    border-bottom-color:#3b82f6;
+    background:rgba(59,130,246,0.06);
+    color:#3b82f6;
+}
+.partial-hint {
+    font-size:12px;
+    color:#e67e22;
+    margin-left:8px;
+}
 .dict-hint {
     font-size:11px; color:var(--text3); letter-spacing:2px;
     font-family:monospace;
@@ -286,6 +313,107 @@ body {
 .dict-correct-answer {
     font-size:13px; font-weight:700; color:var(--ok);
     margin-top:2px;
+}
+
+/* ---- Dictation Correction Display ---- */
+.dict-corrections {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    justify-content: center; margin: 12px 0 4px;
+}
+.dict-correction-item {
+    background: rgba(0,0,0,0.03);
+    border-radius: 10px; padding: 8px 12px;
+    min-width: 80px; text-align: center;
+}
+.dict-spelling-item {
+    border: 1px solid rgba(231,76,60,0.2);
+    background: rgba(231,76,60,0.04);
+}
+.dict-near-correct-item {
+    border: 1px solid rgba(240,173,78,0.25);
+    background: rgba(240,173,78,0.05);
+}
+.dict-omission-item {
+    border: 1px solid rgba(59,130,246,0.2);
+    background: rgba(59,130,246,0.04);
+}
+.dict-addition-item {
+    border: 1px solid rgba(230,126,34,0.2);
+    background: rgba(230,126,34,0.04);
+}
+
+/* Double-line diff display */
+.dict-diff-line {
+    display: flex; align-items: baseline; gap: 6px;
+    font-family: 'Inter', 'Noto Sans SC', monospace;
+    letter-spacing: 1.5px;
+}
+.dict-diff-label {
+    font-size: 11px; color: var(--text3); min-width: 28px;
+    flex-shrink: 0;
+}
+.dict-diff-user {
+    font-size: 16px; color: var(--text2);
+    margin-bottom: 2px;
+}
+.dict-diff-correct {
+    font-size: 17px; font-weight: 700; color: var(--text1);
+}
+
+/* Character-level error highlighting with wavy underline */
+.dict-char-err {
+    color: #e74c3c; font-weight: 700;
+    text-decoration: underline wavy #e74c3c;
+    text-underline-offset: 3px;
+}
+.dict-char-miss {
+    color: #27ae60; font-weight: 700;
+    text-decoration: underline wavy #3b82f6;
+    text-underline-offset: 3px;
+}
+.dict-char-extra {
+    color: #e67e22; font-weight: 700;
+    text-decoration: underline wavy #e67e22;
+    text-underline-offset: 3px;
+}
+.dict-char-gap {
+    color: var(--text3); opacity: 0.4;
+    font-size: 0.8em;
+}
+
+/* Error tags: 漏写 / 多写 */
+.dict-error-tag {
+    display: inline-block; font-size: 11px; font-weight: 700;
+    padding: 2px 6px; border-radius: 4px; margin-right: 6px;
+    letter-spacing: 0;
+}
+.dict-tag-omission {
+    background: rgba(59,130,246,0.15); color: #3b82f6;
+}
+.dict-tag-addition {
+    background: rgba(230,126,34,0.15); color: #e67e22;
+}
+.dict-tag-order {
+    background: rgba(139,92,246,0.15); color: #8b5cf6;
+}
+.dict-order-item {
+    border-left: 3px solid #8b5cf6;
+}
+.dict-omission-word {
+    font-size: 15px; font-weight: 700; color: #3b82f6;
+    letter-spacing: 1px;
+}
+.dict-addition-word {
+    font-size: 15px; font-weight: 700; color: #e67e22;
+    letter-spacing: 1px;
+}
+
+/* Error summary bar at bottom */
+.dict-error-summary {
+    text-align: center; padding: 8px 0 2px;
+    font-size: 13px; color: var(--text3);
+    border-top: 1px solid rgba(0,0,0,0.06);
+    margin-top: 8px;
 }
 
 .dictation-actions {
@@ -1132,10 +1260,526 @@ body {
     gap: 4px;
 }
 
+/* ============================================================
+   Word Practice Modal (跟读+听写)
+   ============================================================ */
+.word-practice-modal {
+    max-width: 520px;
+    max-height: 90vh;
+}
+.practice-tabs {
+    display: flex;
+    gap: 0;
+    background: var(--bg2);
+    border-radius: 10px;
+    padding: 3px;
+    margin-bottom: 14px;
+}
+.practice-tab {
+    flex: 1;
+    padding: 8px 12px;
+    border: none;
+    background: transparent;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text3);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.practice-tab.active {
+    background: var(--pri);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(79,70,229,0.3);
+}
+.practice-progress {
+    text-align: center;
+    font-size: 13px;
+    color: var(--text3);
+    margin-bottom: 12px;
+    font-weight: 500;
+}
+.practice-card {
+    background: var(--card);
+    border-radius: 16px;
+    padding: 24px 20px;
+    text-align: center;
+    border: 1px solid var(--border);
+}
+.practice-word {
+    font-size: 36px;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 6px;
+}
+.practice-ipa {
+    font-size: 16px;
+    color: var(--text2);
+    margin-bottom: 10px;
+    font-family: 'Inter', monospace;
+}
+.practice-meaning {
+    font-size: 14px;
+    color: var(--text2);
+    margin-bottom: 16px;
+}
+.practice-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-bottom: 16px;
+}
+.practice-error-info {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+.practice-error-badge {
+    padding: 3px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.practice-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    margin-top: 16px;
+}
+.btn-practice-record {
+    padding: 12px 28px;
+    border-radius: 24px;
+    background: var(--pri);
+    color: #fff;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+}
+.btn-practice-record:hover { opacity: 0.9; }
+.btn-practice-record.recording {
+    background: var(--err);
+    animation: pulse 1.5s infinite;
+}
+.btn-practice-play {
+    padding: 10px 20px;
+    border-radius: 24px;
+    background: var(--bg2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.practice-dictation-input {
+    width: 80%;
+    max-width: 300px;
+    padding: 12px 16px;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    font-size: 20px;
+    text-align: center;
+    font-weight: 600;
+    outline: none;
+    transition: border-color 0.2s;
+    margin: 12px auto;
+    display: block;
+}
+.practice-dictation-input:focus {
+    border-color: var(--pri);
+}
+.btn-practice-check {
+    padding: 10px 28px;
+    border-radius: 24px;
+    background: var(--pri);
+    color: #fff;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.practice-result {
+    margin-top: 16px;
+    padding: 12px;
+    border-radius: 12px;
+    text-align: center;
+}
+.practice-result.correct {
+    background: rgba(34,197,94,0.1);
+    color: var(--ok);
+}
+.practice-result.incorrect {
+    background: rgba(239,68,68,0.08);
+    color: var(--err);
+}
+.practice-result.partial-result {
+    background: rgba(230,126,34,0.08);
+    color: #e67e22;
+}
+.practice-score-ring {
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 10px;
+    position: relative;
+}
+.practice-score-value {
+    font-size: 24px;
+    font-weight: 800;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+.practice-fsrs-result {
+    margin-top: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--bg2);
+    font-size: 12px;
+    color: var(--text2);
+}
+.practice-next-btn {
+    margin-top: 14px;
+    padding: 10px 24px;
+    border-radius: 24px;
+    background: var(--ok);
+    color: #fff;
+    border: none;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+/* Error Stats Tab */
+.error-stats-section {
+    margin-bottom: 16px;
+}
+.error-stats-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.error-stats-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+.error-stats-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    background: var(--bg2);
+    font-size: 13px;
+}
+.error-stats-word {
+    font-weight: 600;
+    color: var(--text);
+}
+.error-stats-count {
+    font-weight: 700;
+    font-size: 12px;
+}
+.error-stats-empty {
+    text-align: center;
+    padding: 20px;
+    color: var(--text3);
+    font-size: 13px;
+}
+
+/* Phoneme Error Display */
+.practice-phoneme-errors {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--bg);
+}
+.phoneme-error-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 14px;
+}
+.phoneme-expected {
+    color: #27ae60;
+    font-weight: 700;
+    min-width: 40px;
+    text-align: right;
+}
+.phoneme-actual {
+    color: #e74c3c;
+    font-weight: 700;
+    min-width: 40px;
+}
+.phoneme-error-type {
+    font-size: 11px;
+    color: var(--text3);
+    background: var(--bg2);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+/* Phoneme Sequence Display */
+.practice-phoneme-seq {
+    margin-top: 10px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+}
+
+/* Correct Answer Display (Dictation) */
+.practice-correct-answer {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: 10px;
+    background: rgba(34,197,94,0.06);
+    border: 1px solid rgba(34,197,94,0.15);
+    text-align: center;
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+}
+
 /* ---- Responsive additions ---- */
 @media (max-width:480px) {
     .mode-selector { gap: 1px; }
     .mode-btn { padding: 4px 10px; font-size: 11px; }
     .word-review-rating { grid-template-columns: repeat(2, 1fr); }
     .data-change-banner { font-size: 12px; padding: 8px 12px; }
+    .practice-word { font-size: 28px; }
+    .practice-dictation-input { font-size: 18px; }
+}
+
+/* ---- Settings Modal ---- */
+.settings-section {
+    margin-bottom: 20px;
+}
+.settings-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text1);
+    margin-bottom: 6px;
+}
+.settings-desc {
+    font-size: 12px;
+    color: var(--text3);
+    margin-bottom: 10px;
+}
+.settings-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.settings-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 2px solid var(--bg2);
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.settings-option:hover {
+    border-color: var(--pri-l);
+}
+.settings-option.active {
+    border-color: var(--pri);
+    background: rgba(79,70,229,0.04);
+}
+.settings-option input[type="radio"] {
+    margin-top: 3px;
+    accent-color: var(--pri);
+}
+.settings-option-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text1);
+}
+.settings-option-desc {
+    font-size: 12px;
+    color: var(--text3);
+    margin-top: 2px;
+}
+.settings-pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--bg2);
+    font-size: 14px;
+    color: var(--text1);
+}
+.settings-pref-row:last-child { border-bottom: none; }
+
+/* Toggle switch */
+.settings-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+}
+.settings-switch input { opacity: 0; width: 0; height: 0; }
+.settings-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #ccc;
+    border-radius: 24px;
+    transition: 0.3s;
+}
+.settings-slider:before {
+    content: "";
+    position: absolute;
+    height: 18px; width: 18px;
+    left: 3px; bottom: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: 0.3s;
+}
+.settings-switch input:checked + .settings-slider {
+    background: var(--pri);
+}
+.settings-switch input:checked + .settings-slider:before {
+    transform: translateX(20px);
+}
+
+/* ---- Progress Rings ---- */
+.progress-rings {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-bottom: 16px;
+}
+.progress-ring-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+.progress-ring-svg {
+    width: 72px;
+    height: 72px;
+}
+.progress-ring-label {
+    margin-top: -46px;
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    position: relative;
+}
+.progress-ring-val {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--text1);
+}
+.progress-ring-unit {
+    font-size: 10px;
+    color: var(--text3);
+}
+.progress-ring-title {
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 22px;
+}
+@media (max-width:480px) {
+    .progress-rings { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ---- Achievement Badges ---- */
+.achievements-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 0;
+}
+.achievement-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #fef3c7, #fde68a);
+    font-size: 18px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    cursor: default;
+}
+
+/* ---- Practice Tip Cards ---- */
+.practice-tip-card {
+    display: flex;
+    gap: 12px;
+    padding: 12px;
+    margin-bottom: 8px;
+    border-radius: 10px;
+    background: var(--bg2);
+    border-left: 3px solid var(--pri);
+}
+.practice-tip-icon {
+    font-size: 24px;
+    flex-shrink: 0;
+}
+.practice-tip-content {
+    flex: 1;
+}
+.practice-tip-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text1);
+    margin-bottom: 4px;
+}
+.practice-tip-desc {
+    font-size: 12px;
+    color: var(--text2);
+    line-height: 1.5;
+}
+.practice-tip-action {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--pri);
+    background: rgba(79,70,229,0.08);
+    border: none;
+    border-radius: 14px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.practice-tip-action:hover {
+    background: rgba(79,70,229,0.16);
+}
+
+/* ---- Error word stats ---- */
+.error-stats-meaning {
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }

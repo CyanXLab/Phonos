@@ -1,18 +1,8 @@
 """
-FSRS 间隔重复算法 + SQLite 持久化（支持多用户）
+FSRS 间隔重复算法 + SQLite 持久化
 
 基于 FSRS-4.5 算法实现，用于句子/单词的复习调度。
 Rating: 1=Again, 2=Hard, 3=Good, 4=Easy
-
-关键设计：
-- 新卡片的 due 设为 0（远在过去），确保可以被新卡片查询找到
-- 但 get_due_cards 和 get_review_queue 区分"真正到期的复习卡片"和"新卡片"
-- 到期复习 = state != NEW 且 due <= now
-- 新卡片 = state == NEW（due=0 不算到期复习）
-- 顺序模式：不因 FSRS 复习打断顺序，FSRS 复习嵌入顺序进度中
-
-多用户支持：cards 和 review_log 表均包含 user_id 字段，
-所有查询均按 user_id 过滤。向后兼容：默认 user_id='default'。
 """
 
 import sqlite3
@@ -53,10 +43,7 @@ class Card:
         self.stability = 0.0
         self.retrievability = 0.0
         self.state = self.NEW
-        # 关键修复：新卡片的 due 设为 0，不再用 time.time()
-        # 这样 get_due_cards(到期复习) 不会把新卡片算进去
-        # 新卡片通过 state=0 来识别，而不是 due 时间
-        self.due = 0.0
+        self.due = time.time()
         self.last_review = 0.0
         self.reps = 0
         self.lapses = 0
@@ -126,10 +113,10 @@ class FSRSScheduler:
         if card.state == Card.NEW:
             card.stability = _init_stability(self.w, rating)
             card.difficulty = _init_difficulty(self.w, rating)
-            # FSRS-4.5: 根据评级设置不同的初始状态
-            # Again(1)/Hard(2) → LEARNING, Good(3)/Easy(4) → REVIEW
-            if rating >= 3:
-                card.state = Card.REVIEW
+            if rating == 1:
+                card.state = Card.LEARNING
+            elif rating == 2:
+                card.state = Card.LEARNING
             else:
                 card.state = Card.LEARNING
         else:
@@ -170,7 +157,7 @@ class FSRSScheduler:
 
 
 class FSRSDatabase:
-    """FSRS SQLite 数据库（支持多用户）"""
+    """FSRS SQLite 数据库"""
 
     def __init__(self, db_path: str = None):
         self.db_path = db_path or str(DB_PATH)
@@ -181,9 +168,8 @@ class FSRSDatabase:
         conn = sqlite3.connect(self.db_path)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS cards (
-                card_id TEXT NOT NULL,
+                card_id TEXT PRIMARY KEY,
                 card_type TEXT NOT NULL DEFAULT 'sentence',
-                user_id TEXT NOT NULL DEFAULT 'default',
                 difficulty REAL NOT NULL DEFAULT 0,
                 stability REAL NOT NULL DEFAULT 0,
                 state INTEGER NOT NULL DEFAULT 0,
@@ -192,121 +178,48 @@ class FSRSDatabase:
                 reps INTEGER NOT NULL DEFAULT 0,
                 lapses INTEGER NOT NULL DEFAULT 0,
                 scheduled_days REAL NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL DEFAULT 0,
-                PRIMARY KEY (card_id, user_id)
+                created_at REAL NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS review_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 card_id TEXT NOT NULL,
-                user_id TEXT NOT NULL DEFAULT 'default',
                 rating INTEGER NOT NULL,
                 state INTEGER NOT NULL,
                 due REAL NOT NULL,
                 review_time REAL NOT NULL,
-                elapsed_days REAL NOT NULL DEFAULT 0
+                elapsed_days REAL NOT NULL DEFAULT 0,
+                FOREIGN KEY (card_id) REFERENCES cards(card_id)
             );
 
             CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
             CREATE INDEX IF NOT EXISTS idx_cards_state ON cards(state);
-            CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id);
-            CREATE INDEX IF NOT EXISTS idx_cards_user_type ON cards(user_id, card_type);
             CREATE INDEX IF NOT EXISTS idx_review_card ON review_log(card_id);
-            CREATE INDEX IF NOT EXISTS idx_review_user ON review_log(user_id);
         """)
         conn.commit()
-
-        # Migration: add user_id columns if they don't exist
-        self._migrate_add_user_id(conn)
-
-        # Migration: 修复旧数据 - 把 due=创建时间 且 state=0 的卡片 due 改为 0
-        self._migrate_fix_new_card_due(conn)
-
         conn.close()
-
-    def _migrate_add_user_id(self, conn):
-        """迁移：为旧表添加 user_id 列"""
-        # Check cards table
-        cards_cols = [row[1] for row in conn.execute("PRAGMA table_info(cards)").fetchall()]
-        if 'user_id' not in cards_cols:
-            conn.execute("ALTER TABLE cards ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
-            # Recreate primary key by recreating table
-            conn.executescript("""
-                CREATE TABLE cards_new (
-                    card_id TEXT NOT NULL,
-                    card_type TEXT NOT NULL DEFAULT 'sentence',
-                    user_id TEXT NOT NULL DEFAULT 'default',
-                    difficulty REAL NOT NULL DEFAULT 0,
-                    stability REAL NOT NULL DEFAULT 0,
-                    state INTEGER NOT NULL DEFAULT 0,
-                    due REAL NOT NULL DEFAULT 0,
-                    last_review REAL NOT NULL DEFAULT 0,
-                    reps INTEGER NOT NULL DEFAULT 0,
-                    lapses INTEGER NOT NULL DEFAULT 0,
-                    scheduled_days REAL NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL DEFAULT 0,
-                    PRIMARY KEY (card_id, user_id)
-                );
-                INSERT INTO cards_new SELECT * FROM cards;
-                DROP TABLE cards;
-                ALTER TABLE cards_new RENAME TO cards;
-                CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
-                CREATE INDEX IF NOT EXISTS idx_cards_state ON cards(state);
-                CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id);
-                CREATE INDEX IF NOT EXISTS idx_cards_user_type ON cards(user_id, card_type);
-            """)
-
-        # Check review_log table
-        review_cols = [row[1] for row in conn.execute("PRAGMA table_info(review_log)").fetchall()]
-        if 'user_id' not in review_cols:
-            conn.execute("ALTER TABLE review_log ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_review_user ON review_log(user_id)")
-
-        conn.commit()
-
-    def _migrate_fix_new_card_due(self, conn):
-        """修复旧数据：新卡片(state=0)的 due 应为 0，不是创建时间
-        
-        旧版本 ensure_card 没有显式设置 due，导致 SQLite 默认值 0，
-        但旧版 Card.__init__ 里 due=time.time()，如果通过 review_card 创建
-        的卡片可能导致 state=0 但 due!=0。
-        
-        统一修复：state=0 且 reps=0 的卡片，due 设为 0。
-        """
-        try:
-            conn.execute(
-                "UPDATE cards SET due = 0 WHERE state = 0 AND reps = 0 AND due != 0"
-            )
-            conn.commit()
-        except Exception:
-            pass
 
     def _get_conn(self):
         return sqlite3.connect(self.db_path)
 
-    def ensure_card(self, card_id: str, card_type: str = "sentence", user_id: str = "default"):
+    def ensure_card(self, card_id: str, card_type: str = "sentence"):
         """确保卡片存在"""
         conn = self._get_conn()
-        row = conn.execute(
-            "SELECT card_id FROM cards WHERE card_id = ? AND user_id = ?",
-            (card_id, user_id)
-        ).fetchone()
+        row = conn.execute("SELECT card_id FROM cards WHERE card_id = ?", (card_id,)).fetchone()
         if not row:
-            now = time.time()
             conn.execute(
-                "INSERT INTO cards (card_id, card_type, user_id, due, created_at) VALUES (?, ?, ?, 0, ?)",
-                (card_id, card_type, user_id, now)
+                "INSERT INTO cards (card_id, card_type, created_at) VALUES (?, ?, ?)",
+                (card_id, card_type, time.time())
             )
             conn.commit()
         conn.close()
 
-    def get_card(self, card_id: str, user_id: str = "default") -> Optional[Card]:
+    def get_card(self, card_id: str) -> Optional[Card]:
         """获取卡片"""
         conn = self._get_conn()
         row = conn.execute(
             "SELECT card_id, difficulty, stability, state, due, last_review, reps, lapses, scheduled_days, created_at "
-            "FROM cards WHERE card_id = ? AND user_id = ?",
-            (card_id, user_id)
+            "FROM cards WHERE card_id = ?", (card_id,)
         ).fetchone()
         conn.close()
         if not row:
@@ -323,36 +236,10 @@ class FSRSDatabase:
         card.created_at = row[9]
         return card
 
-    def get_card_info(self, card_id: str, user_id: str = "default") -> Optional[dict]:
-        """获取卡片详细信息（含可回忆率）"""
-        card = self.get_card(card_id, user_id)
-        if not card:
-            return None
-        now = time.time()
-        elapsed = max(0, (now - card.last_review) / 86400.0) if card.last_review > 0 else 0
-        if card.stability > 0 and card.state != Card.NEW:
-            ret = _retrievability(elapsed, card.stability, self.scheduler.decay)
-        else:
-            ret = 0
-
-        return {
-            "card_id": card.card_id,
-            "state": card.state,
-            "state_name": ["new", "learning", "review", "relearning"][card.state],
-            "difficulty": round(card.difficulty, 2),
-            "stability": round(card.stability, 2),
-            "retrievability": round(ret, 4),
-            "due": card.due,
-            "scheduled_days": round(card.scheduled_days, 1),
-            "reps": card.reps,
-            "lapses": card.lapses,
-            "last_review": card.last_review,
-        }
-
-    def review_card(self, card_id: str, rating: int, card_type: str = "sentence", user_id: str = "default") -> dict:
+    def review_card(self, card_id: str, rating: int, card_type: str = "sentence") -> dict:
         """复习卡片并返回结果"""
-        self.ensure_card(card_id, card_type, user_id)
-        card = self.get_card(card_id, user_id)
+        self.ensure_card(card_id, card_type)
+        card = self.get_card(card_id)
         now = time.time()
 
         old_state = card.state
@@ -361,14 +248,14 @@ class FSRSDatabase:
         conn = self._get_conn()
         conn.execute("""
             UPDATE cards SET difficulty=?, stability=?, state=?, due=?, last_review=?,
-            reps=?, lapses=?, scheduled_days=? WHERE card_id=? AND user_id=?
+            reps=?, lapses=?, scheduled_days=? WHERE card_id=?
         """, (card.difficulty, card.stability, card.state, card.due,
-              card.last_review, card.reps, card.lapses, card.scheduled_days, card_id, user_id))
+              card.last_review, card.reps, card.lapses, card.scheduled_days, card_id))
 
         conn.execute("""
-            INSERT INTO review_log (card_id, user_id, rating, state, due, review_time, elapsed_days)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (card_id, user_id, rating, old_state, card.due, now, card.elapsed_days))
+            INSERT INTO review_log (card_id, rating, state, due, review_time, elapsed_days)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (card_id, rating, old_state, card.due, now, card.elapsed_days))
 
         conn.commit()
         conn.close()
@@ -388,17 +275,14 @@ class FSRSDatabase:
             "lapses": card.lapses,
         }
 
-    def get_due_cards(self, card_type: str = "sentence", user_id: str = "default", limit: int = 20) -> List[dict]:
-        """获取真正到期的复习卡片（state != NEW 且 due <= now）
-        
-        关键：只返回已经学习过、现在到期的卡片，不包括新卡片。
-        """
+    def get_due_cards(self, card_type: str = "sentence", limit: int = 20) -> List[dict]:
+        """获取到期卡片"""
         now = time.time()
         conn = self._get_conn()
         rows = conn.execute(
             "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ORDER BY due ASC LIMIT ?",
-            (card_type, user_id, now, limit)
+            "FROM cards WHERE card_type=? AND due <= ? ORDER BY due ASC LIMIT ?",
+            (card_type, now, limit)
         ).fetchall()
         conn.close()
 
@@ -416,62 +300,39 @@ class FSRSDatabase:
             })
         return result
 
-    def get_due_count(self, card_type: str = "sentence", user_id: str = "default") -> int:
-        """获取到期复习卡片数量（不含新卡片）"""
-        now = time.time()
-        conn = self._get_conn()
-        count = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0",
-            (card_type, user_id, now)
-        ).fetchone()[0]
-        conn.close()
-        return count
-
-    def get_new_cards(self, card_type: str = "sentence", user_id: str = "default", limit: int = 10) -> List[str]:
+    def get_new_cards(self, card_type: str = "sentence", limit: int = 10) -> List[str]:
         """获取新卡片ID"""
         conn = self._get_conn()
         rows = conn.execute(
-            "SELECT card_id FROM cards WHERE card_type=? AND user_id=? AND state=0 ORDER BY created_at ASC LIMIT ?",
-            (card_type, user_id, limit)
+            "SELECT card_id FROM cards WHERE card_type=? AND state=0 ORDER BY created_at ASC LIMIT ?",
+            (card_type, limit)
         ).fetchall()
         conn.close()
         return [r[0] for r in rows]
 
-    def get_new_card_count(self, card_type: str = "sentence", user_id: str = "default") -> int:
-        """获取新卡片数量"""
-        conn = self._get_conn()
-        count = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=? AND state=0",
-            (card_type, user_id)
-        ).fetchone()[0]
-        conn.close()
-        return count
-
-    def get_review_queue(self, card_type: str = "sentence", user_id: str = "default", new_per_day: int = 5, review_limit: int = 50) -> List[dict]:
+    def get_review_queue(self, card_type: str = "sentence", new_per_day: int = 5, review_limit: int = 50) -> List[dict]:
         """
         获取复习队列：混合到期复习卡片和新卡片
         策略：先返回到期复习卡片，再补新卡片
-        
-        关键：到期复习 = state != 0 且 due <= now 且 due > 0
-        新卡片 = state == 0
         """
         now = time.time()
         conn = self._get_conn()
 
-        # 到期的复习卡片（真正学过且到期了）
+        # 到期的复习卡片
         review_rows = conn.execute(
             "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ORDER BY due ASC LIMIT ?",
-            (card_type, user_id, now, review_limit)
+            "FROM cards WHERE card_type=? AND state != 0 AND due <= ? ORDER BY due ASC LIMIT ?",
+            (card_type, now, review_limit)
         ).fetchall()
 
         # 新卡片
         new_rows = conn.execute(
             "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type=? AND user_id=? AND state = 0 ORDER BY created_at ASC LIMIT ?",
-            (card_type, user_id, new_per_day)
+            "FROM cards WHERE card_type=? AND state = 0 ORDER BY created_at ASC LIMIT ?",
+            (card_type, new_per_day)
         ).fetchall()
 
+        # 尚未创建卡片的句子（需要在前端句子列表中查找）
         conn.close()
 
         queue = []
@@ -499,132 +360,26 @@ class FSRSDatabase:
 
         return queue
 
-    def get_next_word_for_review(self, user_id: str = "default") -> Optional[dict]:
-        """获取下一个需要复习的单词（FSRS 优先）
-        
-        策略：
-        1. 优先返回到期的复习单词（state != NEW, due <= now）
-        2. 如果没有到期复习，返回新单词（state = NEW）
-        3. 按优先级排序：到期越早越优先，难度越高越优先
-        """
-        now = time.time()
-        conn = self._get_conn()
-
-        # 1. 到期的复习单词（按 due 排序，最早的优先）
-        review_row = conn.execute(
-            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type='word' AND user_id=? AND state != 0 AND due <= ? AND due > 0 "
-            "ORDER BY due ASC, difficulty DESC LIMIT 1",
-            (user_id, now)
-        ).fetchone()
-
-        if review_row:
-            conn.close()
-            return {
-                "card_id": review_row[0],
-                "type": "review",
-                "state": review_row[1],
-                "state_name": ["new", "learning", "review", "relearning"][review_row[1]],
-                "due": review_row[2],
-                "scheduled_days": review_row[3],
-                "reps": review_row[4],
-                "difficulty": round(review_row[5], 2),
-                "stability": round(review_row[6], 2),
-            }
-
-        # 2. 新单词（按创建时间排序，最早的优先）
-        new_row = conn.execute(
-            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type='word' AND user_id=? AND state = 0 "
-            "ORDER BY created_at ASC LIMIT 1",
-            (user_id,)
-        ).fetchone()
-
-        conn.close()
-
-        if new_row:
-            return {
-                "card_id": new_row[0],
-                "type": "new",
-                "state": 0,
-                "state_name": "new",
-                "due": new_row[2],
-                "scheduled_days": new_row[3],
-                "reps": new_row[4],
-                "difficulty": round(new_row[5], 2),
-                "stability": round(new_row[6], 2),
-            }
-
-        return None
-
-    def get_word_review_stats(self, user_id: str = "default") -> dict:
-        """获取单词复习统计
-        
-        掌握度分类：
-        - mastered (已掌握): state=REVIEW 且 due > now (已复习且未到期)
-        - due (待复习): state!=NEW 且 due <= now 且 due > 0 (到期需要复习)
-        - learning (学习中): state=LEARNING 或 RELEARNING
-        - new (新词): state=NEW (从未复习过)
-        """
-        now = time.time()
-        conn = self._get_conn()
-
-        total = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=?", (user_id,)
-        ).fetchone()[0]
-
-        new_count = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state=0", (user_id,)
-        ).fetchone()[0]
-
-        due_count = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state != 0 AND due <= ? AND due > 0",
-            (user_id, now)
-        ).fetchone()[0]
-
-        learning_count = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state IN (1, 3)", (user_id,)
-        ).fetchone()[0]
-
-        mastered_count = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state=2 AND due > ?", 
-            (user_id, now)
-        ).fetchone()[0]
-
-        conn.close()
-
-        return {
-            "total": total,
-            "new": new_count,
-            "due": due_count,
-            "learning": learning_count,
-            "mastered": mastered_count,
-        }
-
-    def get_stats(self, user_id: str = "default") -> dict:
+    def get_stats(self) -> dict:
         """获取学习统计"""
         conn = self._get_conn()
         now = time.time()
 
-        total = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=?", (user_id,)).fetchone()[0]
-        new = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=0", (user_id,)).fetchone()[0]
-        learning = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=1", (user_id,)).fetchone()[0]
-        review = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=2", (user_id,)).fetchone()[0]
-        relearning = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=3", (user_id,)).fetchone()[0]
-        # 只算真正到期的复习卡片（不含新卡片）
-        due_now = conn.execute(
-            "SELECT COUNT(*) FROM cards WHERE user_id=? AND state != 0 AND due <= ? AND due > 0",
-            (user_id, now)
-        ).fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
+        new = conn.execute("SELECT COUNT(*) FROM cards WHERE state=0").fetchone()[0]
+        learning = conn.execute("SELECT COUNT(*) FROM cards WHERE state=1").fetchone()[0]
+        review = conn.execute("SELECT COUNT(*) FROM cards WHERE state=2").fetchone()[0]
+        relearning = conn.execute("SELECT COUNT(*) FROM cards WHERE state=3").fetchone()[0]
+        due_now = conn.execute("SELECT COUNT(*) FROM cards WHERE due <= ?", (now,)).fetchone()[0]
 
-        total_reviews = conn.execute("SELECT COUNT(*) FROM review_log WHERE user_id=?", (user_id,)).fetchone()[0]
+        total_reviews = conn.execute("SELECT COUNT(*) FROM review_log").fetchone()[0]
         today_start = now - (now % 86400)
         today_reviews = conn.execute(
-            "SELECT COUNT(*) FROM review_log WHERE user_id=? AND review_time >= ?", (user_id, today_start)
+            "SELECT COUNT(*) FROM review_log WHERE review_time >= ?", (today_start,)
         ).fetchone()[0]
 
         avg_rating = conn.execute(
-            "SELECT AVG(rating) FROM review_log WHERE user_id=? AND review_time >= ?", (user_id, today_start)
+            "SELECT AVG(rating) FROM review_log WHERE review_time >= ?", (today_start,)
         ).fetchone()[0] or 0
 
         conn.close()

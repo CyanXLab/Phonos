@@ -56,8 +56,9 @@ const S = {
     // --- New state ---
     mode: 'dictation',          // 'dictation' | 'practice'
     ttsFailCount: 0,
-    ttsMode: 'browser',         // 'browser' | 'server'
+    ttsMode: 'server',         // 'browser' | 'server' — 默认用服务端Edge TTS（质量更好）
     dictationResults: null,     // { words: [...], checked: bool }
+    _dictationErrorWords: null, // Backend error words with similarity info
     fsrsRated: false,           // whether user has rated this sentence
     sentenceType: 'new',        // 'new' | 'review'
     pendingReviewCount: 0,
@@ -75,6 +76,8 @@ const S = {
     wordReviewQueue: [],         // Word review queue items
     wordReviewIndex: 0,          // Current index in review queue
     wordReviewTotal: 0,          // Total items in review queue
+    wordReviewSkippedIds: [],    // card_ids already reviewed in this session (avoid repeat)
+    wordPracticeSkippedWords: [], // words already practiced in this session
 };
 
 // 统计数据全部存储在服务端数据库中，跨浏览器自动同步
@@ -197,6 +200,12 @@ function updateUserProfileUI() {
         avatar.textContent = '?';
         name.textContent = '访客';
     }
+
+    // Apply user settings (TTS/translation priority, etc.)
+    const settings = getUserSettings();
+    if (settings.ttsPriority) {
+        S.ttsMode = settings.ttsPriority === 'server' ? 'server' : 'browser';
+    }
 }
 
 function showAuthModal(mode = 'login') {
@@ -311,6 +320,7 @@ const el = {
     wordReviewProgress: $('wordReviewProgress'), wordReviewEmpty: $('wordReviewEmpty'),
     wordReviewCards: $('wordReviewCards'),
     btnWordReview: $('btnWordReview'),
+    btnWordPractice: $('btnWordPractice'),
 };
 
 // ============================================================
@@ -394,7 +404,8 @@ async function fetchReviewCount() {
         }
         if (wordR.ok) {
             const d = await wordR.json();
-            S.pendingWordReviewCount = d.count || 0;  // word due count
+            // total_reviewable: 可练习总数（新词+待复习，不含已掌握）
+            S.pendingWordReviewCount = d.total_reviewable || d.pending_count || d.count || 0;
         }
         updateReviewCounter();
     } catch { /* ignore */ }
@@ -517,6 +528,7 @@ async function loadSentence(forceNew = false) {
 
         S.mode = 'dictation';
         S.dictationResults = null;
+        S._dictationErrorWords = null;
         S.fsrsRated = false;
 
         renderSentence();
@@ -979,13 +991,75 @@ function renderDictationInputs() {
     setTimeout(() => speakTTS(), 500);
 }
 
+// Normalize word for dictation comparison: lowercase + strip punctuation (keep apostrophes/hyphens)
+function normalizeWord(w) {
+    return w.replace(/[^a-zA-Z'\-]/g, '').toLowerCase();
+}
+
+// Build character-level diff between two words (normalized for comparison)
+// Returns { userChars, correctChars } arrays with type info for rendering
+function buildCharDiffForDisplay(expected, actual) {
+    // Normalize for comparison
+    const expNorm = normalizeWord(expected);
+    const actNorm = normalizeWord(actual);
+
+    const m = expNorm.length, n = actNorm.length;
+    const dp = Array.from({length: m + 1}, () => Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            dp[i][j] = expNorm[i-1] === actNorm[j-1]
+                ? dp[i-1][j-1]
+                : 1 + Math.min(dp[i-1][j-1], dp[i-1][j], dp[i][j-1]);
+        }
+    }
+    // Backtrack
+    let userChars = [], correctChars = [];
+    let i = m, j = n;
+    while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && expNorm[i-1] === actNorm[j-1]) {
+            userChars.unshift({ ch: actNorm[j-1], type: 'match' });
+            correctChars.unshift({ ch: expNorm[i-1], type: 'match' });
+            i--; j--;
+        } else if (i > 0 && j > 0 && dp[i][j] === dp[i-1][j-1] + 1) {
+            userChars.unshift({ ch: actNorm[j-1], type: 'sub' });
+            correctChars.unshift({ ch: expNorm[i-1], type: 'sub' });
+            i--; j--;
+        } else if (i > 0 && dp[i][j] === dp[i-1][j] + 1) {
+            // Deletion from expected = omission (漏写) in user input
+            userChars.unshift({ ch: '', type: 'gap' });
+            correctChars.unshift({ ch: expNorm[i-1], type: 'del' });
+            i--;
+        } else {
+            // Insertion in user = addition (多写)
+            userChars.unshift({ ch: actNorm[j-1], type: 'ins' });
+            correctChars.unshift({ ch: '', type: 'gap' });
+            j--;
+        }
+    }
+    return { userChars, correctChars };
+}
+
+// Render character diff as HTML with wavy underlines
+function renderCharDiffLine(chars) {
+    return chars.map(c => {
+        if (c.type === 'match') return `<span>${c.ch}</span>`;
+        if (c.type === 'sub') return `<span class="dict-char-err">${c.ch}</span>`;
+        if (c.type === 'del') return `<span class="dict-char-miss">${c.ch}</span>`;
+        if (c.type === 'ins') return `<span class="dict-char-extra">${c.ch}</span>`;
+        if (c.type === 'gap') return `<span class="dict-char-gap">·</span>`;
+        return '';
+    }).join('');
+}
+
 async function checkDictation() {
     if (!S.sentence) return;
 
     const inputs = el.dictationInputs.querySelectorAll('.dict-input');
     const words = S.sentence.text.split(/\s+/);
-    const userWords = Array.from(inputs).map(inp => inp.value.trim().toLowerCase());
-    const expectedWords = words.map(w => w.replace(/[^a-zA-Z'-]/g, '').toLowerCase());
+    const userWords = Array.from(inputs).map(inp => inp.value.trim());
+    const expectedWords = words.map(w => normalizeWord(w));
 
     // Try backend checking (uses Levenshtein distance)
     let backendResults = null;
@@ -1003,60 +1077,194 @@ async function checkDictation() {
 
     if (backendResults && backendResults.results) {
         let correctCount = 0;
+        let partialCount = 0;
         const alignmentResults = backendResults.results;
-        const inputMap = new Map();
 
-        let ei = 0, ui = 0;
+        // Build word-level display for each alignment result
+        let wordDisplayItems = [];
+        let spellingErrCount = 0;
+        let omissionErrCount = 0;
+        let additionErrCount = 0;
+
         for (const r of alignmentResults) {
             if (r.type === 'match') {
-                inputMap.set(ui, { correct: true, expected: r.expected });
-                ei++; ui++;
+                correctCount++;
+                wordDisplayItems.push({ type: 'match', expected: r.expected_original || r.expected, actual: r.actual_original || r.actual });
+            } else if (r.type === 'order_error') {
+                // 拼写正确但顺序错误
+                spellingErrCount++;
+                const diff = buildCharDiffForDisplay(r.expected_original || r.expected, r.actual_original || r.actual);
+                wordDisplayItems.push({ type: 'order_error', expected: r.expected_original || r.expected, actual: r.actual_original || r.actual, diff });
+            } else if (r.type === 'near_correct') {
+                correctCount++;
+                // Show char diff for near-correct words
+                const diff = buildCharDiffForDisplay(r.expected_original || r.expected, r.actual_original || r.actual);
+                wordDisplayItems.push({ type: 'near_correct', expected: r.expected_original || r.expected, actual: r.actual_original || r.actual, diff });
+            } else if (r.type === 'partial') {
+                partialCount++;
+                spellingErrCount++;
+                const diff = buildCharDiffForDisplay(r.expected_original || r.expected, r.actual_original || r.actual);
+                wordDisplayItems.push({ type: 'partial', expected: r.expected_original || r.expected, actual: r.actual_original || r.actual, diff });
             } else if (r.type === 'substitution') {
-                inputMap.set(ui, { correct: false, expected: r.expected });
-                ei++; ui++;
+                spellingErrCount++;
+                const diff = buildCharDiffForDisplay(r.expected_original || r.expected, r.actual_original || r.actual);
+                wordDisplayItems.push({ type: 'substitution', expected: r.expected_original || r.expected, actual: r.actual_original || r.actual, diff });
             } else if (r.type === 'deletion') {
-                ei++;
+                // Omission: user didn't write this word
+                omissionErrCount++;
+                wordDisplayItems.push({ type: 'deletion', expected: r.expected_original || r.expected });
             } else if (r.type === 'insertion') {
-                ui++;
+                // Addition: user wrote an extra word
+                additionErrCount++;
+                wordDisplayItems.push({ type: 'insertion', actual: r.actual_original || r.actual });
             }
+        }
+
+        // Use backend error_summary if available, otherwise use our counts
+        if (backendResults.error_summary) {
+            spellingErrCount = backendResults.error_summary.spelling;
+            omissionErrCount = backendResults.error_summary.omission;
+            additionErrCount = backendResults.error_summary.addition;
+        }
+
+        // Mark input fields
+        // 使用后端返回的 non_empty_indices 正确映射对齐结果到输入框位置
+        const nonEmptyIndices = backendResults.non_empty_indices || [];
+        const emptyIndices = backendResults.empty_input_indices || [];
+        const inputMap = new Map();
+
+        for (const r of alignmentResults) {
+            const ui = r.user_index;  // 对齐中的非空用户词索引
+            const inputIdx = (ui >= 0 && ui < nonEmptyIndices.length) ? nonEmptyIndices[ui] : -1;
+
+            if (inputIdx >= 0) {
+                if (r.type === 'deletion') { /* deletion 没有 user_index */ }
+                else if (r.type === 'insertion') { /* insertion 没有 expected */ }
+                else if (r.type === 'match') {
+                    inputMap.set(inputIdx, { correct: true, type: 'match' });
+                } else if (r.type === 'order_error') {
+                    inputMap.set(inputIdx, { correct: false, type: 'order_error' });
+                } else if (r.type === 'near_correct') {
+                    inputMap.set(inputIdx, { correct: true, type: 'near_correct' });
+                } else if (r.type === 'partial') {
+                    inputMap.set(inputIdx, { correct: false, type: 'partial' });
+                } else if (r.type === 'substitution') {
+                    inputMap.set(inputIdx, { correct: false, type: 'substitution' });
+                }
+            }
+        }
+
+        // 空输入框标记为漏写
+        for (const idx of emptyIndices) {
+            inputMap.set(idx, { correct: false, type: 'deletion' });
         }
 
         inputs.forEach((input, i) => {
             const mapped = inputMap.get(i);
-            input.classList.remove('correct', 'incorrect');
+            input.classList.remove('correct', 'incorrect', 'partial', 'near-correct', 'order-error', 'deletion');
             if (mapped) {
-                input.classList.add(mapped.correct ? 'correct' : 'incorrect');
-                if (mapped.correct) {
-                    correctCount++;
-                } else {
-                    const answerEl = document.getElementById(`dictAnswer${i}`);
-                    if (answerEl) {
-                        answerEl.textContent = mapped.expected;
-                        answerEl.style.display = '';
-                    }
-                }
+                if (mapped.type === 'near_correct') input.classList.add('correct', 'near-correct');
+                else if (mapped.type === 'partial') input.classList.add('incorrect', 'partial');
+                else if (mapped.type === 'order_error') input.classList.add('incorrect', 'order-error');
+                else if (mapped.type === 'deletion') input.classList.add('incorrect', 'deletion');
+                else if (mapped.correct) input.classList.add('correct');
+                else input.classList.add('incorrect');
             } else {
                 input.classList.add('incorrect');
             }
             input.disabled = true;
         });
 
-        const totalExpected = expectedWords.filter(w => w).length;
+        // Build detailed correction display
+        let correctionHTML = '';
+        for (const item of wordDisplayItems) {
+            if (item.type === 'match') {
+                continue; // Don't show correct words in correction area
+            } else if (item.type === 'deletion') {
+                // Omission: blue tag
+                correctionHTML += `
+                <div class="dict-correction-item dict-omission-item">
+                    <span class="dict-error-tag dict-tag-omission">漏写</span>
+                    <span class="dict-omission-word">${item.expected}</span>
+                </div>`;
+            } else if (item.type === 'insertion') {
+                // Addition: orange tag
+                correctionHTML += `
+                <div class="dict-correction-item dict-addition-item">
+                    <span class="dict-error-tag dict-tag-addition">多写</span>
+                    <span class="dict-addition-word">${item.actual}</span>
+                </div>`;
+            } else if (item.type === 'order_error') {
+                // Order error: purple tag + diff
+                const diff = item.diff;
+                const userLine = renderCharDiffLine(diff.userChars);
+                const correctLine = renderCharDiffLine(diff.correctChars);
+                correctionHTML += `
+                <div class="dict-correction-item dict-order-item">
+                    <span class="dict-error-tag dict-tag-order">顺序错</span>
+                    <div class="dict-diff-line dict-diff-user">
+                        <span class="dict-diff-label">你写</span>
+                        <span class="dict-diff-chars">${userLine || '(空)'}</span>
+                    </div>
+                    <div class="dict-diff-line dict-diff-correct">
+                        <span class="dict-diff-label">正确</span>
+                        <span class="dict-diff-chars">${correctLine}</span>
+                    </div>
+                </div>`;
+            } else {
+                // Spelling errors (substitution, partial, near_correct): double-line diff
+                const diff = item.diff;
+                const userLine = renderCharDiffLine(diff.userChars);
+                const correctLine = renderCharDiffLine(diff.correctChars);
+                const isNearCorrect = item.type === 'near_correct';
+                correctionHTML += `
+                <div class="dict-correction-item ${isNearCorrect ? 'dict-near-correct-item' : 'dict-spelling-item'}">
+                    <div class="dict-diff-line dict-diff-user">
+                        <span class="dict-diff-label">你写</span>
+                        <span class="dict-diff-chars">${userLine || '(空)'}</span>
+                    </div>
+                    <div class="dict-diff-line dict-diff-correct">
+                        <span class="dict-diff-label">正确</span>
+                        <span class="dict-diff-chars">${correctLine}</span>
+                    </div>
+                </div>`;
+            }
+        }
+
+        // 评分：分母用 total_expected（漏写/多写也扣分）
+        const totalExpected = backendResults.error_summary ? alignmentResults.filter(r => r.type !== 'insertion').length : expectedWords.length;
+
+        // Build error summary bar
+        const orderErrCount = backendResults.error_summary?.order_error || 0;
+        let summaryParts = [];
+        if (spellingErrCount > 0) summaryParts.push(`<span style="color:#e74c3c;font-weight:700">拼写 ${spellingErrCount}</span>`);
+        if (omissionErrCount > 0) summaryParts.push(`<span style="color:#3b82f6;font-weight:700">漏写 ${omissionErrCount}</span>`);
+        if (additionErrCount > 0) summaryParts.push(`<span style="color:#e67e22;font-weight:700">多写 ${additionErrCount}</span>`);
+        if (orderErrCount > 0) summaryParts.push(`<span style="color:#8b5cf6;font-weight:700">顺序错 ${orderErrCount}</span>`);
+        const errorSummaryHTML = summaryParts.length > 0
+            ? `<div class="dict-error-summary">${summaryParts.join(' <span style="color:var(--text3);margin:0 4px">|</span> ')}</div>`
+            : '';
+
         el.dictationResults.style.display = '';
         el.dictationResults.innerHTML = `
             <div class="dict-result-summary">
                 <span class="correct-count">${correctCount}</span>
                 <span class="total-count">/ ${totalExpected} 正确</span>
+                ${partialCount > 0 ? `<span class="partial-hint">（${partialCount}个近似）</span>` : ''}
             </div>
+            ${correctionHTML ? `<div class="dict-corrections">${correctionHTML}</div>` : ''}
+            ${errorSummaryHTML}
         `;
         el.dictationActions.style.display = 'none';
         el.dictationTransition.style.display = '';
         S.dictationResults = { correct: correctCount, total: totalExpected, checked: true };
+        // 保存后端返回的错误词信息用于recordDictationErrors
+        S._dictationErrorWords = backendResults.error_words || [];
     } else {
         let correctCount = 0;
         inputs.forEach((input, i) => {
             const answer = expectedWords[i] || '';
-            const isCorrect = input.value.trim().toLowerCase() === answer;
+            const isCorrect = normalizeWord(input.value.trim()) === answer;
             input.classList.remove('correct', 'incorrect');
             input.classList.add(isCorrect ? 'correct' : 'incorrect');
             input.disabled = true;
@@ -1296,6 +1504,12 @@ function bindEvents() {
     if (el.btnWordReview) el.btnWordReview.addEventListener('click', openWordReview);
     if (el.closeWordReviewModal) el.closeWordReviewModal.addEventListener('click', () => el.wordReviewModal.style.display = 'none');
     if (el.wordReviewModal) el.wordReviewModal.addEventListener('click', e => { if (e.target === el.wordReviewModal) el.wordReviewModal.style.display = 'none'; });
+
+    // Word practice modal events
+    initWordPractice();
+
+    // Settings modal
+    initSettings();
 
     // Auth modal events
     const authModal = document.getElementById('authModal');
@@ -2170,6 +2384,12 @@ function renderStatsContent(stats) {
             </div>
         </div>
 
+        ${buildErrorWordStatsHTML(stats)}
+
+        ${buildMotivationHTML(stats)}
+
+        ${buildDeliberatePracticeHTML(stats)}
+
         <!-- 最近得分 -->
         <div class="stats-section">
             <div class="stats-section-header" onclick="toggleStatsCollapse('statsProgressCollapse')">
@@ -2462,11 +2682,24 @@ async function openWordReview() {
     // 重置复习状态
     S.wordReviewQueue = [];
     S.wordReviewIndex = 0;
-    S.wordReviewTotal = 20;  // 每次最多20个
     S.wordReviewReviewed = 0;
     S.wordReviewCorrect = 0;
+    S.wordReviewSkippedIds = [];
 
-    // 加载第一个单词（FSRS 推荐）
+    // 动态获取待复习数量（从后端获取 total_reviewable = 新词+待复习）
+    try {
+        const r = await fetchWithAuth(`${API}/api/fsrs/due-count?card_type=word`);
+        if (r.ok) {
+            const d = await r.json();
+            S.wordReviewTotal = d.total_reviewable || d.pending_count || d.count || 0;
+        } else {
+            S.wordReviewTotal = 0;
+        }
+    } catch {
+        S.wordReviewTotal = 0;
+    }
+
+    // 即使 total 为 0 也尝试加载（可能 total 不准确但实际有单词可复习）
     await loadNextReviewWord();
 }
 
@@ -2474,22 +2707,41 @@ async function loadNextReviewWord() {
     const idx = S.wordReviewReviewed;
     const total = S.wordReviewTotal;
 
-    if (idx >= total) {
+    if (total > 0 && idx >= total) {
         // 达到本次复习上限
         renderWordReviewComplete();
         return;
     }
 
-    el.wordReviewProgress.textContent = `${idx}/${total} 复习完成`;
+    el.wordReviewProgress.textContent = total > 0 ? `${idx}/${total} 复习完成` : '加载中...';
 
     try {
-        const r = await fetchWithAuth(`${API}/api/words/next-review`);
+        let url = `${API}/api/words/next-review`;
+        if (S.wordReviewSkippedIds.length > 0) {
+            url += `?skip=${encodeURIComponent(S.wordReviewSkippedIds.join(','))}`;
+        }
+        const r = await fetchWithAuth(url);
         if (r.ok) {
             const data = await r.json();
             if (!data.word) {
                 // 没有更多需要复习的单词
-                renderWordReviewComplete();
+                if (S.wordReviewReviewed === 0) {
+                    // 一个单词都没复习就返回空了，显示空状态
+                    el.wordReviewProgress.textContent = '0/0 复习完成';
+                    el.wordReviewEmpty.style.display = 'block';
+                    el.wordReviewCards.innerHTML = '';
+                } else {
+                    renderWordReviewComplete();
+                }
                 return;
+            }
+            // 动态更新待复习总数（只增不减，避免评级后总数减少导致提前结束）
+            if (data.review_stats) {
+                const newDue = (data.review_stats.due || 0) + (data.review_stats.new || 0);
+                const newTotal = S.wordReviewReviewed + newDue;
+                if (newTotal > S.wordReviewTotal) {
+                    S.wordReviewTotal = newTotal;
+                }
             }
             S.currentReviewWord = data;
             S.wordReviewStats = data.review_stats || null;
@@ -2637,6 +2889,11 @@ async function submitWordReviewRatingSingle(rating) {
     const card = document.getElementById('wordReviewCurrentCard');
     if (card) card.classList.add('fading');
 
+    // Add to skipped list so we don't get this word again in this session
+    if (data.card_id) {
+        S.wordReviewSkippedIds.push(data.card_id);
+    }
+
     // Submit to backend
     try {
         await fetchWithAuth(`${API}/api/words/review`, {
@@ -2665,10 +2922,27 @@ async function submitWordReviewRatingSingle(rating) {
 async function recordDictationErrors(inputs, expectedWords) {
     if (!S.sentence) return;
 
+    // 优先使用后端返回的详细错误词信息（含编辑距离/相似度）
+    if (S._dictationErrorWords && S._dictationErrorWords.length > 0) {
+        try {
+            await fetchWithAuth(`${API}/api/dictation/record-errors`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    error_words: S._dictationErrorWords,
+                    sentence_id: S.sentence.id,
+                }),
+            });
+        } catch { /* ignore */ }
+        S._dictationErrorWords = null;
+        return;
+    }
+
+    // 回退：前端检测的错误（旧逻辑）
     const errorWords = [];
     inputs.forEach((input, i) => {
         if (input.classList.contains('incorrect')) {
-            const userVal = input.value.trim().toLowerCase();
+            const userVal = normalizeWord(input.value.trim());
             const expected = expectedWords[i] || '';
             if (userVal && expected) {
                 errorWords.push({
@@ -2699,6 +2973,942 @@ async function recordDictationErrors(inputs, expectedWords) {
 // ============================================================
 
 // ============================================================
+// Word Practice Modal (跟读+听写+错误统计)
+// ============================================================
+
+// Practice state
+const PS = {
+    tab: 'pronunciation',  // 'pronunciation' | 'dictation' | 'errors'
+    currentWord: null,
+    practiced: 0,
+    total: 0,
+    isRecording: false,
+    mediaRecorder: null,
+    audioChunks: [],
+    ttsAudio: null,
+};
+
+function initWordPractice() {
+    // Button
+    if (el.btnWordPractice) {
+        el.btnWordPractice.addEventListener('click', openWordPractice);
+    }
+    // Modal elements
+    const modal = document.getElementById('wordPracticeModal');
+    const closeBtn = document.getElementById('closeWordPracticeModal');
+    if (closeBtn) closeBtn.addEventListener('click', () => { modal.style.display = 'none'; stopTTS(); });
+    if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) { modal.style.display = 'none'; stopTTS(); } });
+
+    // Tab switching
+    document.querySelectorAll('.practice-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            document.querySelectorAll('.practice-tab').forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            PS.tab = tab.dataset.tab;
+            PS.practiced = 0;  // 切换标签页时重置计数
+            S.wordPracticeSkippedWords = [];  // 重置跳过列表
+            if (PS.tab === 'errors') {
+                loadErrorStats();
+            } else {
+                loadNextPracticeWord();
+            }
+        });
+    });
+}
+
+function stopTTS() {
+    if (PS.ttsAudio) {
+        PS.ttsAudio.pause();
+        PS.ttsAudio = null;
+    }
+}
+
+async function playWordTTS(word) {
+    stopTTS();
+    try {
+        const url = `${API}/api/tts?text=${encodeURIComponent(word)}`;
+        PS.ttsAudio = new Audio(url);
+        await PS.ttsAudio.play();
+    } catch {
+        // Fallback to browser TTS
+        if ('speechSynthesis' in window) {
+            const u = new SpeechSynthesisUtterance(word);
+            u.lang = 'en-US';
+            speechSynthesis.speak(u);
+        }
+    }
+}
+
+async function openWordPractice() {
+    const modal = document.getElementById('wordPracticeModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+
+    // Reset state
+    PS.practiced = 0;
+    PS.tab = 'pronunciation';
+    S.wordPracticeSkippedWords = [];
+
+    // Reset tabs
+    document.querySelectorAll('.practice-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector('.practice-tab[data-tab="pronunciation"]').classList.add('active');
+
+    // Get total reviewable for pronunciation mode (跟读=读错的单词)
+    // We don't use due-count here because each mode has its own total
+    PS.total = 0;
+    document.getElementById('practiceProgress').textContent = `0/? 练习完成`;
+    await loadNextPracticeWord();
+}
+
+async function loadNextPracticeWord() {
+    const content = document.getElementById('practiceContent');
+    content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载中...</div>';
+
+    try {
+        // 根据当前标签页传递 mode 参数给后端，让后端返回对应类型的单词
+        const modeParam = PS.tab === 'pronunciation' ? 'pronunciation' : PS.tab === 'dictation' ? 'dictation' : 'all';
+        let url = `${API}/api/words/practice-next?mode=${modeParam}`;
+        // Pass skipped words to avoid repetition
+        if (S.wordPracticeSkippedWords.length > 0) {
+            url += `&skip=${encodeURIComponent(S.wordPracticeSkippedWords.join(','))}`;
+        }
+        const r = await fetchWithAuth(url);
+        if (r.ok) {
+            const data = await r.json();
+            if (!data.word) {
+                const msg = data.message || '暂无可练习的单词！';
+                content.innerHTML = `<div style="text-align:center;padding:30px;"><div style="font-size:32px;margin-bottom:12px;">🎉</div><div style="font-size:16px;font-weight:700;color:var(--ok);">${msg}</div></div>`;
+                return;
+            }
+            PS.currentWord = data;
+            // Update total dynamically (only increase, never decrease - same pattern as wordReviewTotal)
+            if (data.total_reviewable) {
+                const newTotal = data.total_reviewable;
+                if (newTotal > PS.total) PS.total = newTotal;
+            }
+            // Ensure total is at least practiced+1 (since we're still loading new words)
+            if (PS.total < PS.practiced + 1) PS.total = PS.practiced + 1;
+            document.getElementById('practiceProgress').textContent = `${PS.practiced}/${PS.total} 练习完成`;
+
+            if (PS.tab === 'pronunciation') {
+                renderPronunciationCard(data);
+            } else if (PS.tab === 'dictation') {
+                renderDictationCard(data);
+            } else {
+                renderPronunciationCard(data);
+            }
+        }
+    } catch {
+        content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);">加载失败</div>';
+    }
+}
+
+function renderPronunciationCard(data) {
+    const content = document.getElementById('practiceContent');
+    const stateColors = { new: { bg: '#f0f0f0', color: '#888' }, learning: { bg: '#fef3e2', color: '#e67e22' }, review: { bg: '#e8f4fd', color: '#3498db' }, relearning: { bg: '#fde8e8', color: '#e74c3c' } };
+    const sc = stateColors[data.fsrs_state] || stateColors.new;
+    const stateLabels = { new: '新词', learning: '学习中', review: '复习', relearning: '重学' };
+
+    content.innerHTML = `
+    <div class="practice-card" id="practiceCard">
+        <div class="practice-word">${data.word}</div>
+        <div class="practice-ipa">/${data.ipa || ''}/</div>
+        <div class="practice-meaning">${data.meaning || ''}</div>
+        <span class="practice-badge" style="background:${sc.bg};color:${sc.color}">${stateLabels[data.fsrs_state] || '新词'}</span>
+        ${data.pronunciation_errors > 0 ? `<div class="practice-error-info"><span class="practice-error-badge" style="background:#fde8e8;color:#e74c3c">读错×${data.pronunciation_errors}</span></div>` : ''}
+        <div class="practice-actions">
+            <button class="btn-practice-play" id="btnPlayWord">🔊 播放</button>
+            <button class="btn-practice-record" id="btnRecordWord">🎤 跟读</button>
+        </div>
+        <div id="practiceResultArea"></div>
+    </div>`;
+
+    document.getElementById('btnPlayWord').addEventListener('click', () => playWordTTS(data.word));
+    document.getElementById('btnRecordWord').addEventListener('click', startPracticeRecording);
+}
+
+function renderDictationCard(data) {
+    const content = document.getElementById('practiceContent');
+    const stateColors = { new: { bg: '#f0f0f0', color: '#888' }, learning: { bg: '#fef3e2', color: '#e67e22' }, review: { bg: '#e8f4fd', color: '#3498db' }, relearning: { bg: '#fde8e8', color: '#e74c3c' } };
+    const sc = stateColors[data.fsrs_state] || stateColors.new;
+    const stateLabels = { new: '新词', learning: '学习中', review: '复习', relearning: '重学' };
+
+    content.innerHTML = `
+    <div class="practice-card" id="practiceCard">
+        <div style="font-size:14px;color:var(--text3);margin-bottom:12px;">听发音，拼写单词</div>
+        <div class="practice-meaning" style="margin-bottom:8px;">${data.meaning || ''}</div>
+        <span class="practice-badge" style="background:${sc.bg};color:${sc.color}">${stateLabels[data.fsrs_state] || '新词'}</span>
+        ${data.dictation_errors > 0 ? `<div class="practice-error-info"><span class="practice-error-badge" style="background:#fef3e2;color:#e67e22">听错×${data.dictation_errors}</span></div>` : ''}
+        <div class="practice-actions" style="margin-bottom:12px;">
+            <button class="btn-practice-play" id="btnPlayWord">🔊 播放</button>
+        </div>
+        <input type="text" class="practice-dictation-input" id="dictationInput" placeholder="输入单词..." autocomplete="off" autocapitalize="none" spellcheck="false">
+        <button class="btn-practice-check" id="btnCheckDictation">确认</button>
+        <div id="practiceResultArea"></div>
+    </div>`;
+
+    document.getElementById('btnPlayWord').addEventListener('click', () => playWordTTS(data.word));
+    document.getElementById('btnCheckDictation').addEventListener('click', submitDictationPractice);
+    document.getElementById('dictationInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitDictationPractice();
+    });
+
+    // Auto-play TTS
+    setTimeout(() => playWordTTS(data.word), 300);
+}
+
+async function startPracticeRecording() {
+    if (PS.isRecording) {
+        stopPracticeRecording();
+        return;
+    }
+
+    const btn = document.getElementById('btnRecordWord');
+    if (!btn) return;
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
+        });
+        PS.audioChunks = [];
+        PS.mediaRecorder = new MediaRecorder(stream, { mimeType: getMime() });
+        PS.isRecording = true;
+        btn.classList.add('recording');
+        btn.innerHTML = '⏹ 停止';
+
+        PS.mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) PS.audioChunks.push(e.data);
+        };
+
+        PS.mediaRecorder.onstop = async () => {
+            stream.getTracks().forEach(t => t.stop());
+            btn.classList.remove('recording');
+            btn.innerHTML = '🎤 跟读';
+            PS.isRecording = false;
+            // Clear auto-stop timer
+            if (PS._autoStopTimer) { clearTimeout(PS._autoStopTimer); PS._autoStopTimer = null; }
+            await submitPronunciationPractice();
+        };
+
+        // Request data every 100ms to ensure ondataavailable fires regularly
+        // This prevents the recorder from auto-stopping silently
+        PS.mediaRecorder.start(100);
+
+        // Auto-stop after 10 seconds (generous for single word)
+        PS._autoStopTimer = setTimeout(() => {
+            if (PS.isRecording) stopPracticeRecording();
+        }, 10000);
+    } catch {
+        btn.classList.remove('recording');
+        PS.isRecording = false;
+    }
+}
+
+function stopPracticeRecording() {
+    if (PS.mediaRecorder && PS.mediaRecorder.state !== 'inactive') {
+        PS.mediaRecorder.stop();
+    }
+}
+
+async function submitPronunciationPractice() {
+    if (!PS.currentWord || PS.audioChunks.length === 0) return;
+    const resultArea = document.getElementById('practiceResultArea');
+    resultArea.innerHTML = '<div style="text-align:center;padding:10px;color:var(--text3);font-size:13px;">评分中...</div>';
+
+    try {
+        const audioBlob = new Blob(PS.audioChunks, { type: 'audio/webm' });
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
+        formData.append('word', PS.currentWord.word);
+
+        const r = await fetchWithAuth(`${API}/api/words/practice-evaluate`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (r.ok) {
+            const data = await r.json();
+            const score = data.effective_score || 0;
+            const rating = data.auto_rating || 1;
+            const ratingNames = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
+            const ratingColors = { 1: '#e74c3c', 2: '#e67e22', 3: '#27ae60', 4: '#27ae60' };
+
+            const resultClass = score >= 70 ? 'correct' : score >= 50 ? 'partial-result' : 'incorrect';
+
+            // Build phoneme error details
+            let phonemeErrorsHTML = '';
+            const errors = data.errors || [];
+            if (errors.length > 0) {
+                phonemeErrorsHTML = '<div class="practice-phoneme-errors">';
+                phonemeErrorsHTML += '<div style="font-size:12px;color:var(--text3);margin-bottom:6px;">音素对比</div>';
+                for (const err of errors.slice(0, 8)) {
+                    const expectedIPA = ARPABET_TO_IPA[err.expected] || err.expected;
+                    const actualIPA = err.actual ? (ARPABET_TO_IPA[err.actual] || err.actual) : '—';
+                    const errTypeLabels = {
+                        'substitution': '替换',
+                        'insertion': '多读',
+                        'deletion': '漏读',
+                    };
+                    const errType = errTypeLabels[err.type] || err.type;
+                    phonemeErrorsHTML += `
+                    <div class="phoneme-error-row">
+                        <span class="phoneme-expected">/${expectedIPA}/</span>
+                        <span style="color:var(--text3);">→</span>
+                        <span class="phoneme-actual">/${actualIPA}/</span>
+                        <span class="phoneme-error-type">${errType}</span>
+                    </div>`;
+                }
+                phonemeErrorsHTML += '</div>';
+            }
+
+            // Build expected vs actual phoneme sequence
+            let phonemeSeqHTML = '';
+            const phonemes = data.phonemes || {};
+            if (phonemes.expected && phonemes.actual) {
+                const expectedIPA = phonemes.expected.map(p => ARPABET_TO_IPA[p] || p).join(' ');
+                const actualIPA = phonemes.actual.map(p => ARPABET_TO_IPA[p] || p).join(' ');
+                phonemeSeqHTML = `
+                <div class="practice-phoneme-seq">
+                    <div><span style="color:var(--text3);font-size:11px;">标准: </span><span style="color:#27ae60;">/${expectedIPA}/</span></div>
+                    <div><span style="color:var(--text3);font-size:11px;">你的: </span><span style="color:${score >= 70 ? '#27ae60' : '#e74c3c'};">/${actualIPA}/</span></div>
+                </div>`;
+            }
+
+            resultArea.innerHTML = `
+            <div class="practice-result ${resultClass}">
+                <div class="practice-score-value" style="position:static;font-size:32px;color:${ratingColors[rating]}">${Math.round(score)}</div>
+                <div style="font-size:13px;margin-top:4px;">发音分数</div>
+            </div>
+            ${phonemeSeqHTML}
+            ${phonemeErrorsHTML}
+            <div class="practice-fsrs-result">
+                自动评级: <strong style="color:${ratingColors[rating]}">${ratingNames[rating]}</strong>
+                ${data.fsrs_result ? ` · 下次复习: ${data.fsrs_result.scheduled_days.toFixed(1)}天后` : ''}
+            </div>
+            <button class="practice-next-btn" id="btnNextWord">下一个 →</button>`;
+
+            PS.practiced++;
+            // Add to skipped list
+            if (PS.currentWord.word && !S.wordPracticeSkippedWords.includes(PS.currentWord.word.toLowerCase())) {
+                S.wordPracticeSkippedWords.push(PS.currentWord.word.toLowerCase());
+            }
+            document.getElementById('practiceProgress').textContent = `${PS.practiced}/${PS.total} 练习完成`;
+            document.getElementById('btnNextWord').addEventListener('click', loadNextPracticeWord);
+        } else {
+            resultArea.innerHTML = '<div class="practice-result incorrect">评分失败，请重试</div>';
+        }
+    } catch {
+        resultArea.innerHTML = '<div class="practice-result incorrect">网络错误</div>';
+    }
+}
+
+async function submitDictationPractice() {
+    if (!PS.currentWord) return;
+    const input = document.getElementById('dictationInput');
+    if (!input) return;
+    const userInputRaw = input.value.trim();
+    const userInput = normalizeWord(userInputRaw);
+    if (!userInput) return;
+
+    const resultArea = document.getElementById('practiceResultArea');
+    resultArea.innerHTML = '<div style="text-align:center;padding:10px;color:var(--text3);font-size:13px;">检查中...</div>';
+
+    try {
+        const r = await fetchWithAuth(`${API}/api/words/dictation-practice`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ word: PS.currentWord.word, user_input: userInput }),
+        });
+
+        if (r.ok) {
+            const data = await r.json();
+            const ratingNames = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
+            const ratingColors = { 1: '#e74c3c', 2: '#e67e22', 3: '#27ae60', 4: '#27ae60' };
+            const resultClass = data.correct ? 'correct' : data.type === 'partial' ? 'partial-result' : 'incorrect';
+            const resultIcon = data.correct ? '✅' : data.type === 'partial' ? '🔶' : '❌';
+
+            // Always show correct answer with IPA and meaning
+            const correctWord = data.word || PS.currentWord.word;
+            const correctIPA = PS.currentWord.ipa || '';
+            const correctMeaning = PS.currentWord.meaning || '';
+
+            let detail = '';
+            if (data.type === 'match') detail = '完全正确！';
+            else if (data.type === 'near_correct') detail = `近似正确（相似度${Math.round(data.similarity * 100)}%）`;
+            else if (data.type === 'partial') detail = `部分正确（相似度${Math.round(data.similarity * 100)}%）`;
+            else detail = '拼写错误';
+
+            // Show correct answer with double-line diff when wrong
+            let correctAnswerHTML = '';
+            if (!data.correct || data.type === 'near_correct') {
+                const diff = buildCharDiffForDisplay(correctWord, userInputRaw);
+                const userLine = renderCharDiffLine(diff.userChars);
+                const correctLine = renderCharDiffLine(diff.correctChars);
+
+                // Count error types
+                let spellingCnt = diff.userChars.filter(c => c.type === 'sub').length;
+                let missCnt = diff.correctChars.filter(c => c.type === 'del').length;
+                let extraCnt = diff.userChars.filter(c => c.type === 'ins').length;
+
+                let errorSummaryParts = [];
+                if (spellingCnt > 0) errorSummaryParts.push(`<span style="color:#e74c3c;font-weight:700">拼写 ${spellingCnt}</span>`);
+                if (missCnt > 0) errorSummaryParts.push(`<span style="color:#3b82f6;font-weight:700">漏写 ${missCnt}</span>`);
+                if (extraCnt > 0) errorSummaryParts.push(`<span style="color:#e67e22;font-weight:700">多写 ${extraCnt}</span>`);
+                const errorSummaryHTML = errorSummaryParts.length > 0
+                    ? `<div class="dict-error-summary" style="margin-top:8px;">${errorSummaryParts.join(' <span style="color:var(--text3);margin:0 4px">|</span> ')}</div>`
+                    : '';
+
+                correctAnswerHTML = `
+                <div class="practice-correct-answer">
+                    <div class="dict-diff-line dict-diff-user">
+                        <span class="dict-diff-label">你写</span>
+                        <span class="dict-diff-chars">${userLine || '(空)'}</span>
+                    </div>
+                    <div class="dict-diff-line dict-diff-correct">
+                        <span class="dict-diff-label">正确</span>
+                        <span class="dict-diff-chars">${correctLine}</span>
+                    </div>
+                    ${correctIPA ? `<div style="font-size:14px;color:var(--text2);margin-top:6px;">/${correctIPA}/</div>` : ''}
+                    ${correctMeaning ? `<div style="font-size:13px;color:var(--text3);margin-top:2px;">${correctMeaning}</div>` : ''}
+                    ${errorSummaryHTML}
+                </div>`;
+            }
+
+            resultArea.innerHTML = `
+            <div class="practice-result ${resultClass}">
+                <div style="font-size:28px;margin-bottom:6px;">${resultIcon}</div>
+                <div style="font-size:14px;">${detail}</div>
+            </div>
+            ${correctAnswerHTML}
+            <div class="practice-fsrs-result">
+                自动评级: <strong style="color:${ratingColors[data.auto_rating]}">${ratingNames[data.auto_rating]}</strong>
+                ${data.fsrs_result ? ` · 下次复习: ${data.fsrs_result.scheduled_days.toFixed(1)}天后` : ''}
+            </div>
+            <button class="practice-next-btn" id="btnNextWord">下一个 →</button>`;
+
+            input.disabled = true;
+            PS.practiced++;
+            // Add to skipped list
+            if (PS.currentWord.word && !S.wordPracticeSkippedWords.includes(PS.currentWord.word.toLowerCase())) {
+                S.wordPracticeSkippedWords.push(PS.currentWord.word.toLowerCase());
+            }
+            document.getElementById('practiceProgress').textContent = `${PS.practiced}/${PS.total} 练习完成`;
+            document.getElementById('btnNextWord').addEventListener('click', loadNextPracticeWord);
+        }
+    } catch {
+        resultArea.innerHTML = '<div class="practice-result incorrect">网络错误</div>';
+    }
+}
+
+async function loadErrorStats() {
+    const content = document.getElementById('practiceContent');
+    content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载统计...</div>';
+
+    try {
+        const r = await fetchWithAuth(`${API}/api/words/error-stats`);
+        if (r.ok) {
+            const data = await r.json();
+            renderErrorStats(data);
+        }
+    } catch {
+        content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);">加载失败</div>';
+    }
+}
+
+function renderErrorStats(data) {
+    const content = document.getElementById('practiceContent');
+    const pronErrors = data.pronunciation_errors || [];
+    const dictErrors = data.dictation_errors || [];
+    const summary = data.summary || {};
+
+    let html = `
+    <div style="text-align:center;margin-bottom:16px;font-size:13px;color:var(--text2);">
+        读错 <strong style="color:#e74c3c">${summary.total_pron_errors || 0}</strong> 词 · 
+        听错 <strong style="color:#e67e22">${summary.total_dict_errors || 0}</strong> 词 · 
+        合计 <strong>${summary.total_unique_errors || 0}</strong> 词
+    </div>`;
+
+    // Pronunciation errors
+    html += `<div class="error-stats-section">
+        <div class="error-stats-title">🎤 经常读错的单词</div>`;
+    if (pronErrors.length === 0) {
+        html += '<div class="error-stats-empty">暂无读错记录 ✨</div>';
+    } else {
+        html += '<ul class="error-stats-list">';
+        pronErrors.slice(0, 15).forEach(ew => {
+            html += `<li class="error-stats-item">
+                <span class="error-stats-word">${ew.word} <span style="color:var(--text3);font-size:11px;">/${ew.ipa}/</span></span>
+                <span class="error-stats-count" style="color:#e74c3c">${ew.pronunciation_errors}次</span>
+            </li>`;
+        });
+        html += '</ul>';
+    }
+    html += '</div>';
+
+    // Dictation errors
+    html += `<div class="error-stats-section">
+        <div class="error-stats-title">✏️ 经常听写错的单词</div>`;
+    if (dictErrors.length === 0) {
+        html += '<div class="error-stats-empty">暂无听写错误 ✨</div>';
+    } else {
+        html += '<ul class="error-stats-list">';
+        dictErrors.slice(0, 15).forEach(ew => {
+            html += `<li class="error-stats-item">
+                <span class="error-stats-word">${ew.word} <span style="color:var(--text3);font-size:11px;">/${ew.ipa}/</span></span>
+                <span class="error-stats-count" style="color:#e67e22">${ew.dictation_errors}次</span>
+            </li>`;
+        });
+        html += '</ul>';
+    }
+    html += '</div>';
+
+    content.innerHTML = html;
+}
+
+// ============================================================
+// ============================================================
+// Settings Modal - TTS & Translation Priority, Preferences
+// ============================================================
+function initSettings() {
+    const btn = document.getElementById('btnSettings');
+    const modal = document.getElementById('settingsModal');
+    const closeBtn = document.getElementById('closeSettingsModal');
+    if (btn) btn.addEventListener('click', openSettings);
+    if (closeBtn) closeBtn.addEventListener('click', () => { modal.style.display = 'none'; });
+    if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
+}
+
+function openSettings() {
+    const modal = document.getElementById('settingsModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    renderSettings();
+}
+
+function getUserSettings() {
+    return (S.user && S.user.settings) || {};
+}
+
+async function saveUserSettings(settings) {
+    if (S.user && S.user.id !== 'default') {
+        try {
+            await fetchWithAuth(`${API}/api/auth/profile`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ settings }),
+            });
+            S.user.settings = settings;
+        } catch { /* fallback to localStorage */ }
+    }
+    // Also save to localStorage as backup
+    try { localStorage.setItem('phonos_settings', JSON.stringify(settings)); } catch {}
+}
+
+function renderSettings() {
+    const body = document.getElementById('settingsModalBody');
+    if (!body) return;
+    const settings = getUserSettings();
+    const ttsPriority = settings.ttsPriority || 'server';  // 'server' (Edge TTS) or 'browser'
+    const transPriority = settings.transPriority || 'online';  // 'online' (Edge/Google) or 'local' (ONNX)
+
+    body.innerHTML = `
+    <div class="settings-section">
+        <h4 class="settings-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+            语音合成 (TTS) 优先级
+        </h4>
+        <p class="settings-desc">选择语音合成引擎的优先顺序</p>
+        <div class="settings-options">
+            <label class="settings-option ${ttsPriority === 'server' ? 'active' : ''}">
+                <input type="radio" name="ttsPriority" value="server" ${ttsPriority === 'server' ? 'checked' : ''}>
+                <div class="settings-option-content">
+                    <div class="settings-option-title">Edge TTS 优先（推荐）</div>
+                    <div class="settings-option-desc">高质量在线语音，发音自然清晰，需联网</div>
+                </div>
+            </label>
+            <label class="settings-option ${ttsPriority === 'browser' ? 'active' : ''}">
+                <input type="radio" name="ttsPriority" value="browser" ${ttsPriority === 'browser' ? 'checked' : ''}>
+                <div class="settings-option-content">
+                    <div class="settings-option-title">浏览器 TTS 优先</div>
+                    <div class="settings-option-desc">使用浏览器内置语音，响应快但质量一般</div>
+                </div>
+            </label>
+        </div>
+    </div>
+
+    <div class="settings-section">
+        <h4 class="settings-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><path d="M5 8l6 6 6-6"/></svg>
+            翻译引擎优先级
+        </h4>
+        <p class="settings-desc">选择翻译服务的优先顺序</p>
+        <div class="settings-options">
+            <label class="settings-option ${transPriority === 'online' ? 'active' : ''}">
+                <input type="radio" name="transPriority" value="online" ${transPriority === 'online' ? 'checked' : ''}>
+                <div class="settings-option-content">
+                    <div class="settings-option-title">在线翻译优先（推荐）</div>
+                    <div class="settings-option-desc">Edge翻译→MyMemory→Google，质量高需联网</div>
+                </div>
+            </label>
+            <label class="settings-option ${transPriority === 'local' ? 'active' : ''}">
+                <input type="radio" name="transPriority" value="local" ${transPriority === 'local' ? 'checked' : ''}>
+                <div class="settings-option-content">
+                    <div class="settings-option-title">离线翻译优先</div>
+                    <div class="settings-option-desc">ONNX本地模型→简易词典，无需网络但质量有限</div>
+                </div>
+            </label>
+        </div>
+    </div>
+
+    <div class="settings-section">
+        <h4 class="settings-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><path d="M12 20V10M18 20V4M6 20v-6"/></svg>
+            学习偏好
+        </h4>
+        <div class="settings-pref-row">
+            <span>自动播放发音</span>
+            <label class="settings-switch">
+                <input type="checkbox" id="settingAutoPlay" ${settings.autoPlay !== false ? 'checked' : ''}>
+                <span class="settings-slider"></span>
+            </label>
+        </div>
+        <div class="settings-pref-row">
+            <span>显示音标提示</span>
+            <label class="settings-switch">
+                <input type="checkbox" id="settingShowIPA" ${settings.showIPA !== false ? 'checked' : ''}>
+                <span class="settings-slider"></span>
+            </label>
+        </div>
+        <div class="settings-pref-row">
+            <span>听写模式默认开启</span>
+            <label class="settings-switch">
+                <input type="checkbox" id="settingDictMode" ${settings.dictMode !== false ? 'checked' : ''}>
+                <span class="settings-slider"></span>
+            </label>
+        </div>
+    </div>`;
+
+    // Event listeners for settings changes
+    body.querySelectorAll('input[name="ttsPriority"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            const val = radio.value;
+            S.ttsMode = val === 'server' ? 'server' : 'browser';
+            const s = getUserSettings();
+            s.ttsPriority = val;
+            saveUserSettings(s);
+            // Update visual
+            body.querySelectorAll('input[name="ttsPriority"]').forEach(r => {
+                r.closest('.settings-option').classList.toggle('active', r.checked);
+            });
+        });
+    });
+    body.querySelectorAll('input[name="transPriority"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            const s = getUserSettings();
+            s.transPriority = radio.value;
+            saveUserSettings(s);
+            body.querySelectorAll('input[name="transPriority"]').forEach(r => {
+                r.closest('.settings-option').classList.toggle('active', r.checked);
+            });
+        });
+    });
+    ['settingAutoPlay', 'settingShowIPA', 'settingDictMode'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', () => {
+            const s = getUserSettings();
+            s.autoPlay = document.getElementById('settingAutoPlay')?.checked ?? true;
+            s.showIPA = document.getElementById('settingShowIPA')?.checked ?? true;
+            s.dictMode = document.getElementById('settingDictMode')?.checked ?? true;
+            saveUserSettings(s);
+        });
+    });
+}
+
+
+// ============================================================
+// Enhanced Stats - Error Word Stats + Motivation System
+// ============================================================
+
+// Achievement badges and motivational elements
+const ACHIEVEMENTS = {
+    streak_1: { icon: '🔥', name: '初学乍练', desc: '连续学习1天', threshold: 1 },
+    streak_3: { icon: '🔥', name: '渐入佳境', desc: '连续学习3天', threshold: 3 },
+    streak_7: { icon: '🔥', name: '持之以恒', desc: '连续学习7天', threshold: 7 },
+    streak_14: { icon: '🔥', name: '锲而不舍', desc: '连续学习14天', threshold: 14 },
+    streak_30: { icon: '🔥', name: '习惯养成', desc: '连续学习30天', threshold: 30 },
+    words_10: { icon: '📚', name: '初窥门径', desc: '学习10个单词', threshold: 10 },
+    words_50: { icon: '📚', name: '小有所成', desc: '学习50个单词', threshold: 50 },
+    words_100: { icon: '📚', name: '学富五车', desc: '学习100个单词', threshold: 100 },
+    words_200: { icon: '📚', name: '博学多识', desc: '学习200个单词', threshold: 200 },
+    perfect: { icon: '💯', name: '完美发音', desc: '获得100分评测', threshold: 1 },
+    perfect_5: { icon: '💯', name: '精益求精', desc: '获得5次100分', threshold: 5 },
+    practice_50: { icon: '🎯', name: '刻意练习', desc: '完成50次练习', threshold: 50 },
+    practice_200: { icon: '🎯', name: '千锤百炼', desc: '完成200次练习', threshold: 200 },
+    mastered_10: { icon: '⭐', name: '小有所获', desc: '掌握10个单词', threshold: 10 },
+    mastered_50: { icon: '⭐', name: '硕果累累', desc: '掌握50个单词', threshold: 50 },
+    mastered_100: { icon: '⭐', name: '登峰造极', desc: '掌握100个单词', threshold: 100 },
+};
+
+function computeAchievements(stats) {
+    const analytics = stats.analytics || {};
+    const wordsLearned = stats.words_learned || {};
+    const scores = stats.recent_scores || [];
+    const wordReviewStats = stats.word_review_stats || {};
+    const totalPractice = stats.total_practice || 0;
+    const streak = analytics.streak || 0;
+    const wordsCount = Object.keys(wordsLearned).length;
+    const masteredCount = wordReviewStats.mastered || 0;
+    const perfectCount = scores.filter(s => s >= 99).length;
+
+    const earned = [];
+    const next = [];
+
+    // Streak achievements
+    for (const [key, ach] of Object.entries(ACHIEVEMENTS)) {
+        let progress = 0;
+        if (key.startsWith('streak_')) progress = streak;
+        else if (key.startsWith('words_')) progress = wordsCount;
+        else if (key === 'perfect') progress = perfectCount;
+        else if (key === 'perfect_5') progress = perfectCount;
+        else if (key.startsWith('practice_')) progress = totalPractice;
+        else if (key.startsWith('mastered_')) progress = masteredCount;
+
+        if (progress >= ach.threshold) {
+            earned.push({ ...ach, key, progress });
+        }
+    }
+
+    // Find next unearned milestones
+    const streakNext = [7, 14, 30].find(t => streak < t) || 30;
+    const wordsNext = [50, 100, 200].find(t => wordsCount < t) || 200;
+    const masteredNext = [50, 100].find(t => masteredCount < t) || 100;
+
+    return { earned, streakNext, wordsNext, masteredNext, streak, wordsCount, masteredCount, totalPractice };
+}
+
+// Build motivation/progress section HTML
+function buildMotivationHTML(stats) {
+    const ach = computeAchievements(stats);
+    const analytics = stats.analytics || {};
+
+    // Progress rings
+    const streakPct = Math.min(100, (ach.streak / ach.streakNext) * 100);
+    const wordsPct = Math.min(100, (ach.wordsCount / ach.wordsNext) * 100);
+    const masteredPct = Math.min(100, (ach.masteredCount / ach.masteredNext) * 100);
+
+    // Daily goal progress (假设每日目标: 5次练习)
+    const todayEval = analytics.today_evaluations || 0;
+    const dailyGoal = 5;
+    const dailyPct = Math.min(100, (todayEval / dailyGoal) * 100);
+
+    let earnedHTML = ach.earned.length > 0
+        ? ach.earned.slice(-8).map(a => `<span class="achievement-badge" title="${a.name}: ${a.desc}">${a.icon}</span>`).join('')
+        : '<span style="font-size:13px;color:var(--text3);">开始学习来解锁成就！</span>';
+
+    return `
+    <div class="stats-section">
+        <div class="stats-section-header" onclick="toggleStatsCollapse('statsMotivationCollapse')">
+            <h4 class="stats-section-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                学习进展与成就
+            </h4>
+            <span class="stats-collapse-arrow" id="statsMotivationCollapseArrow">▼</span>
+        </div>
+        <div class="stats-section-body" id="statsMotivationCollapse">
+            <!-- Progress Rings -->
+            <div class="progress-rings">
+                <div class="progress-ring-item">
+                    <svg class="progress-ring-svg" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="#f0f0f0" stroke-width="6"/>
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="#f59e0b" stroke-width="6" stroke-linecap="round"
+                            stroke-dasharray="${2 * Math.PI * 32}" stroke-dashoffset="${2 * Math.PI * 32 * (1 - streakPct / 100)}"
+                            transform="rotate(-90 40 40)"/>
+                    </svg>
+                    <div class="progress-ring-label">
+                        <span class="progress-ring-val">${ach.streak}</span>
+                        <span class="progress-ring-unit">天</span>
+                    </div>
+                    <div class="progress-ring-title">连续学习</div>
+                </div>
+                <div class="progress-ring-item">
+                    <svg class="progress-ring-svg" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="#f0f0f0" stroke-width="6"/>
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="var(--pri)" stroke-width="6" stroke-linecap="round"
+                            stroke-dasharray="${2 * Math.PI * 32}" stroke-dashoffset="${2 * Math.PI * 32 * (1 - wordsPct / 100)}"
+                            transform="rotate(-90 40 40)"/>
+                    </svg>
+                    <div class="progress-ring-label">
+                        <span class="progress-ring-val">${ach.wordsCount}</span>
+                        <span class="progress-ring-unit">词</span>
+                    </div>
+                    <div class="progress-ring-title">已学单词</div>
+                </div>
+                <div class="progress-ring-item">
+                    <svg class="progress-ring-svg" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="#f0f0f0" stroke-width="6"/>
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="var(--ok)" stroke-width="6" stroke-linecap="round"
+                            stroke-dasharray="${2 * Math.PI * 32}" stroke-dashoffset="${2 * Math.PI * 32 * (1 - masteredPct / 100)}"
+                            transform="rotate(-90 40 40)"/>
+                    </svg>
+                    <div class="progress-ring-label">
+                        <span class="progress-ring-val">${ach.masteredCount}</span>
+                        <span class="progress-ring-unit">词</span>
+                    </div>
+                    <div class="progress-ring-title">已掌握</div>
+                </div>
+                <div class="progress-ring-item">
+                    <svg class="progress-ring-svg" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="#f0f0f0" stroke-width="6"/>
+                        <circle cx="40" cy="40" r="32" fill="none" stroke="var(--warn)" stroke-width="6" stroke-linecap="round"
+                            stroke-dasharray="${2 * Math.PI * 32}" stroke-dashoffset="${2 * Math.PI * 32 * (1 - dailyPct / 100)}"
+                            transform="rotate(-90 40 40)"/>
+                    </svg>
+                    <div class="progress-ring-label">
+                        <span class="progress-ring-val">${todayEval}</span>
+                        <span class="progress-ring-unit">/${dailyGoal}</span>
+                    </div>
+                    <div class="progress-ring-title">今日目标</div>
+                </div>
+            </div>
+
+            <!-- Achievements -->
+            <div class="achievements-row">
+                ${earnedHTML}
+            </div>
+        </div>
+    </div>`;
+}
+
+// Build error word stats HTML (dictation + pronunciation errors)
+function buildErrorWordStatsHTML(stats) {
+    const ewStats = stats.error_words_stats || {};
+    const dictErrors = ewStats.dictation_errors || [];
+    const pronErrors = ewStats.pronunciation_errors || [];
+    const summary = ewStats.summary || {};
+
+    return `
+    <div class="stats-section">
+        <div class="stats-section-header" onclick="toggleStatsCollapse('statsDictErrorCollapse')">
+            <h4 class="stats-section-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e67e22" stroke-width="2"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+                听写错误单词
+            </h4>
+            <div class="stats-section-summary">
+                ${dictErrors.length > 0 ? `<span class="stats-badge warn">${dictErrors.length}个单词</span>` : '<span class="stats-badge ok">零错误</span>'}
+                <span class="stats-collapse-arrow" id="statsDictErrorCollapseArrow">▼</span>
+            </div>
+        </div>
+        <div class="stats-section-body" id="statsDictErrorCollapse">
+            ${dictErrors.length > 0 ? `<ul class="error-stats-list">
+                ${dictErrors.slice(0, 15).map(ew => `<li class="error-stats-item">
+                    <span class="error-stats-word">${ew.word} <span style="color:var(--text3);font-size:11px;">/${ew.ipa}/</span></span>
+                    <span class="error-stats-meaning" style="font-size:11px;color:var(--text3);margin-left:4px;">${ew.meaning}</span>
+                    <span class="error-stats-count" style="color:#e67e22;margin-left:auto;">${ew.dictation_errors}次</span>
+                </li>`).join('')}
+            </ul>` : '<p style="font-size:13px;color:var(--text3);padding:8px 0;">暂无听写错误 ✨</p>'}
+        </div>
+    </div>
+
+    <div class="stats-section">
+        <div class="stats-section-header" onclick="toggleStatsCollapse('statsPronErrorCollapse')">
+            <h4 class="stats-section-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e74c3c" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+                发音错误单词
+            </h4>
+            <div class="stats-section-summary">
+                ${pronErrors.length > 0 ? `<span class="stats-badge error">${pronErrors.length}个单词</span>` : '<span class="stats-badge ok">零错误</span>'}
+                <span class="stats-collapse-arrow" id="statsPronErrorCollapseArrow">▼</span>
+            </div>
+        </div>
+        <div class="stats-section-body" id="statsPronErrorCollapse">
+            ${pronErrors.length > 0 ? `<ul class="error-stats-list">
+                ${pronErrors.slice(0, 15).map(ew => `<li class="error-stats-item">
+                    <span class="error-stats-word">${ew.word} <span style="color:var(--text3);font-size:11px;">/${ew.ipa}/</span></span>
+                    <span class="error-stats-meaning" style="font-size:11px;color:var(--text3);margin-left:4px;">${ew.meaning}</span>
+                    <span class="error-stats-count" style="color:#e74c3c;margin-left:auto;">${ew.pronunciation_errors}次</span>
+                </li>`).join('')}
+            </ul>` : '<p style="font-size:13px;color:var(--text3);padding:8px 0;">暂无发音错误 ✨</p>'}
+        </div>
+    </div>`;
+}
+
+// Build deliberate practice tips HTML
+function buildDeliberatePracticeHTML(stats) {
+    const weakness = stats.weakness || {};
+    const analytics = stats.analytics || {};
+    const ewStats = stats.error_words_stats || {};
+    const dictErrors = ewStats.dictation_errors || [];
+    const pronErrors = ewStats.pronunciation_errors || [];
+
+    // Science-based learning tips
+    const tips = [];
+
+    // Spaced repetition tip
+    const wordStats = stats.word_review_stats || {};
+    if (wordStats.due > 0) {
+        tips.push({ icon: '🧠', title: '间隔重复', desc: `你有${wordStats.due}个单词待复习。科学研究表明，在即将遗忘时复习效果最佳（艾宾浩斯遗忘曲线），现在正是最佳时机！`, action: 'openWordReview()' });
+    }
+
+    // Weakness-focused practice
+    const phonWeakness = weakness.phoneme_weaknesses || [];
+    if (phonWeakness.length > 0) {
+        const top3 = phonWeakness.slice(0, 3).map(w => `/${ARPABET_TO_IPA[w.phoneme] || w.phoneme}/`).join('、');
+        tips.push({ icon: '🎯', title: '刻意练习', desc: `你的薄弱音素：${top3}。刻意练习原则：将薄弱环节拆解为小目标，反复专注训练，而非舒适地重复已掌握的内容。`, action: null });
+    }
+
+    // Dictation errors → focus on spelling
+    if (dictErrors.length > 0) {
+        const top3 = dictErrors.slice(0, 3).map(e => e.word).join('、');
+        tips.push({ icon: '✏️', title: '听写强化', desc: `经常听错的词：${top3}。建议：先听发音→拼写→对照→再听一遍，建立音形映射。`, action: 'openWordPractice()' });
+    }
+
+    // Pronunciation errors → focus on articulation
+    if (pronErrors.length > 0) {
+        const top3 = pronErrors.slice(0, 3).map(e => e.word).join('、');
+        tips.push({ icon: '🎤', title: '发音纠偏', desc: `经常读错的词：${top3}。建议：慢速跟读→录音对比→重点纠正错误音素→逐步加速。`, action: 'openWordPractice()' });
+    }
+
+    // Active recall tip
+    if (analytics.today_evaluations < 3) {
+        tips.push({ icon: '💡', title: '主动回忆', desc: '测试效应（Testing Effect）：主动回忆比被动阅读更有效。尝试在听写模式下先不看提示，靠回忆拼写单词。', action: null });
+    }
+
+    // Interleaving tip
+    if (stats.total_practice > 10) {
+        tips.push({ icon: '🔀', title: '交替练习', desc: '交替练习（Interleaving）比集中练习更有效。尝试在跟读、听写、复习之间切换，不要一直做同一种练习。', action: null });
+    }
+
+    if (tips.length === 0) {
+        tips.push({ icon: '🌱', title: '开始学习', desc: '科学学习法则：主动回忆 > 被动阅读，间隔重复 > 集中突击，刻意练习 > 机械重复。开始你的第一次练习吧！', action: null });
+    }
+
+    return `
+    <div class="stats-section">
+        <div class="stats-section-header" onclick="toggleStatsCollapse('statsPracticeTipsCollapse')">
+            <h4 class="stats-section-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 1 1 7.072 0l-.548.547A3.374 3.374 0 0 0 14 18.469V19a2 2 0 1 1-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                科学学习方法
+            </h4>
+            <div class="stats-section-summary">
+                <span class="stats-badge ok">${tips.length}条建议</span>
+                <span class="stats-collapse-arrow" id="statsPracticeTipsCollapseArrow">▼</span>
+            </div>
+        </div>
+        <div class="stats-section-body" id="statsPracticeTipsCollapse">
+            ${tips.map(t => `
+            <div class="practice-tip-card">
+                <div class="practice-tip-icon">${t.icon}</div>
+                <div class="practice-tip-content">
+                    <div class="practice-tip-title">${t.title}</div>
+                    <div class="practice-tip-desc">${t.desc}</div>
+                    ${t.action ? `<button class="practice-tip-action" onclick="${t.action}">去练习 →</button>` : ''}
+                </div>
+            </div>`).join('')}
+        </div>
+    </div>`;
+}
+
+
 // Boot
 // ============================================================
 document.addEventListener('DOMContentLoaded', init);

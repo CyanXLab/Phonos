@@ -1,0 +1,915 @@
+     1→     1→"""
+     2→     2→Phonos 口语练习平台 - FastAPI 后端
+     3→     3→"""
+     4→     4→
+     5→     5→import os
+     6→     6→import sys
+     7→     7→import traceback
+     8→     8→import tempfile
+     9→     9→import random
+    10→    10→from pathlib import Path
+    11→    11→from typing import Optional
+    12→    12→
+    13→    13→from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
+    14→    14→from fastapi.middleware.cors import CORSMiddleware
+    15→    15→from fastapi.staticfiles import StaticFiles
+    16→    16→from fastapi.responses import FileResponse
+    17→    17→import numpy as np
+    18→    18→
+    19→    19→sys.path.insert(0, str(Path(__file__).parent))
+    20→    20→
+    21→    21→from phoneme_data import (
+    22→    22→    PRESET_SENTENCES, WORD_DICT, PHONEME_TIPS, MINIMAL_PAIRS,
+    23→    23→    ARPABET_TO_IPA, VOCAB, PHONEME_EXAMPLE_WORD,
+    24→    24→    update_phoneme_cache,
+    25→    25→)
+    26→    26→from g2p_service import get_g2p_service, G2PService
+    27→    27→from onnx_service import get_recognizer
+    28→    28→from scoring import evaluate_pronunciation, generate_error_tips, result_to_dict
+    29→    29→from fsrs_db import get_fsrs_db
+    30→    30→from tts_service import generate_tts, generate_phoneme_audio, check_tts_available
+    31→    31→from dict_service import get_dict_service
+    32→    32→from translate_service import translate_text
+    33→    33→
+    34→    34→app = FastAPI(title="Phonos 口语练习平台", version="2.0.0")
+    35→    35→
+    36→    36→app.add_middleware(
+    37→    37→    CORSMiddleware,
+    38→    38→    allow_origins=["*"],
+    39→    39→    allow_credentials=True,
+    40→    40→    allow_methods=["*"],
+    41→    41→    allow_headers=["*"],
+    42→    42→)
+    43→    43→
+    44→    44→# 模型路径：优先读环境变量，否则在项目根目录的 model/ 子目录中查找
+    45→    45→_SCRIPT_DIR = Path(__file__).resolve().parent
+    46→    46→_PROJECT_ROOT = _SCRIPT_DIR.parent
+    47→    47→
+    48→    48→def _find_model() -> str:
+    49→    49→    """自动查找 ONNX 模型文件"""
+    50→    50→    env_path = os.environ.get("HUPER_MODEL_PATH", "")
+    51→    51→    if env_path and os.path.isfile(env_path):
+    52→    52→        return env_path
+    53→    53→
+    54→    54→    # 按优先级搜索
+    55→    55→    search_paths = [
+    56→    56→        _PROJECT_ROOT / "models" / "model.onnx",
+    57→    57→        _PROJECT_ROOT / "models" / "model_quantized.onnx",
+    58→    58→        _SCRIPT_DIR / "models" / "model.onnx",
+    59→    59→        _SCRIPT_DIR / "models" / "model_quantized.onnx",
+    60→    60→        _PROJECT_ROOT / "huper_onnx" / "model.onnx",
+    61→    61→        _PROJECT_ROOT / "huper_onnx_int8_dynamic" / "model_quantized.onnx",
+    62→    62→    ]
+    63→    63→    for p in search_paths:
+    64→    64→        if p.is_file():
+    65→    65→            return str(p)
+    66→    66→
+    67→    67→    return ""
+    68→    68→
+    69→    69→MODEL_PATH = _find_model()
+    70→    70→_phoneme_cache: dict = {}
+    71→    71→
+    72→    72→
+    73→    73→@app.on_event("startup")
+    74→    74→async def startup():
+    75→    75→    print("[启动] 初始化 Phonos 口语练习平台...")
+    76→    76→
+    77→    77→    # 1. 加载句子（从 JSON 文件，触发 PRESET_SENTENCES 延迟加载）
+    78→    78→    print(f"[启动] 句子数据加载完成，共 {len(PRESET_SENTENCES)} 个预设句子")
+    79→    79→
+    80→    80→    # 2. 初始化 G2P 服务（需要在音素缓存更新之前）
+    81→    81→    g2p = get_g2p_service()
+    82→    82→    print(f"[启动] G2P 服务就绪 (g2p_en: {'可用' if g2p.available else '不可用，使用词典'})")
+    83→    83→
+    84→    84→    # 3. 增量更新音素缓存（传入句子和 G2P 服务）
+    85→    85→    global _phoneme_cache
+    86→    86→    _phoneme_cache = update_phoneme_cache(PRESET_SENTENCES, g2p)
+    87→    87→    print("[启动] 音素缓存更新完成")
+    88→    88→
+    89→    89→    # 4. 加载 ONNX 模型
+    90→    90→    if MODEL_PATH and os.path.exists(MODEL_PATH):
+    91→    91→        try:
+    92→    92→            get_recognizer(MODEL_PATH)
+    93→    93→            print(f"[启动] ONNX 模型加载成功: {MODEL_PATH}")
+    94→    94→        except Exception as e:
+    95→    95→            print(f"[启动] ONNX 模型加载失败: {e}")
+    96→    96→    else:
+    97→    97→        print("[启动] ⚠️  未找到 ONNX 模型，请将模型文件放到以下位置之一:")
+    98→    98→        print(f"         - {_PROJECT_ROOT / 'model' / 'model.onnx'}")
+    99→    99→        print(f"         - {_PROJECT_ROOT / 'model' / 'model_quantized.onnx'}")
+   100→   100→        print("         或设置环境变量 HUPER_MODEL_PATH 指定模型路径")
+   101→   101→
+   102→   102→    # 5. 初始化 FSRS 数据库，为所有句子创建卡片
+   103→   103→    try:
+   104→   104→        fsrs = get_fsrs_db()
+   105→   105→        for sentence in PRESET_SENTENCES:
+   106→   106→            card_id = f"sentence_{sentence['id']}"
+   107→   107→            fsrs.ensure_card(card_id, card_type="sentence")
+   108→   108→        print(f"[启动] FSRS 数据库初始化完成，已为 {len(PRESET_SENTENCES)} 个句子创建卡片")
+   109→   109→    except Exception as e:
+   110→   110→        print(f"[启动] ⚠️  FSRS 数据库初始化失败: {e}")
+   111→   111→
+   112→   112→    # 6. 检查 TTS 可用性
+   113→   113→    tts_status = check_tts_available()
+   114→   114→    available_engines = [k for k, v in tts_status.items() if v]
+   115→   115→    if available_engines:
+   116→   116→        print(f"[启动] TTS 服务可用: {', '.join(available_engines)}")
+   117→   117→    else:
+   118→   118→        print("[启动] ⚠️  TTS 服务不可用，请安装 edge-tts 或 pyttsx3")
+   119→   119→
+   120→   120→    print("[启动] 平台初始化完成")
+   121→   121→
+   122→   122→
+   123→   123→# ============================================================
+   124→   124→# API 路由
+   125→   125→# ============================================================
+   126→   126→
+   127→   127→@app.get("/api/health")
+   128→   128→async def health_check():
+   129→   129→    model_ok = MODEL_PATH != "" and os.path.exists(MODEL_PATH)
+   130→   130→    try:
+   131→   131→        get_recognizer()
+   132→   132→        model_loaded = True
+   133→   133→    except:
+   134→   134→        model_loaded = False
+   135→   135→
+   136→   136→    tts_status = check_tts_available()
+   137→   137→
+   138→   138→    return {
+   139→   139→        "status": "ok",
+   140→   140→        "model_loaded": model_loaded or model_ok,
+   141→   141→        "g2p_available": get_g2p_service().available,
+   142→   142→        "tts_available": tts_status,
+   143→   143→        "fsrs_available": True,
+   144→   144→    }
+   145→   145→
+   146→   146→
+   147→   147→@app.get("/api/sentence")
+   148→   148→async def get_random_sentence(force_new: bool = Query(False, description="强制获取新句子，跳过FSRS")):
+   149→   149→    """获取练习句子（FSRS 优先，混合复习和新句子）"""
+   150→   150→    # force_new 模式：跳过 FSRS，直接随机
+   151→   151→    if force_new:
+   152→   152→        sentence = random.choice(PRESET_SENTENCES)
+   153→   153→        return _enrich_sentence(sentence)
+   154→   154→
+   155→   155→    # 尝试从 FSRS 获取复习队列
+   156→   156→    try:
+   157→   157→        fsrs = get_fsrs_db()
+   158→   158→        queue = fsrs.get_review_queue(card_type="sentence", new_per_day=5)
+   159→   159→
+   160→   160→        if queue:
+   161→   161→            # 优先选择到期的复习卡片
+   162→   162→            review_cards = [q for q in queue if q["type"] == "review"]
+   163→   163→            new_cards = [q for q in queue if q["type"] == "new"]
+   164→   164→
+   165→   165→            # 如果有到期复习卡片，随机选一个
+   166→   166→            if review_cards:
+   167→   167→                chosen = random.choice(review_cards)
+   168→   168→                card_id = chosen["card_id"]
+   169→   169→                # card_id 格式为 "sentence_{id}" 或句子文本
+   170→   170→                sentence = _find_sentence_by_card_id(card_id)
+   171→   171→                if sentence:
+   172→   172→                    result = _enrich_sentence(sentence)
+   173→   173→                    result["fsrs"] = chosen
+   174→   174→                    return result
+   175→   175→
+   176→   176→            # 如果没有到期复习卡片，从新卡片中选
+   177→   177→            if new_cards:
+   178→   178→                chosen = random.choice(new_cards)
+   179→   179→                card_id = chosen["card_id"]
+   180→   180→                sentence = _find_sentence_by_card_id(card_id)
+   181→   181→                if sentence:
+   182→   182→                    result = _enrich_sentence(sentence)
+   183→   183→                    result["fsrs"] = chosen
+   184→   184→                    return result
+   185→   185→
+   186→   186→        # 如果队列为空，选择尚未加入 FSRS 的句子
+   187→   187→        fsrs_card_ids = set()
+   188→   188→        try:
+   189→   189→            # 获取所有已存在的卡片 ID
+   190→   190→            import sqlite3
+   191→   191→            conn = sqlite3.connect(fsrs.db_path)
+   192→   192→            rows = conn.execute("SELECT card_id FROM cards WHERE card_type='sentence'").fetchall()
+   193→   193→            fsrs_card_ids = {r[0] for r in rows}
+   194→   194→            conn.close()
+   195→   195→        except Exception:
+   196→   196→            pass
+   197→   197→
+   198→   198→        unregistered = [
+   199→   199→            s for s in PRESET_SENTENCES
+   200→   200→            if f"sentence_{s['id']}" not in fsrs_card_ids
+   201→   201→        ]
+   202→   202→        if unregistered:
+   203→   203→            sentence = random.choice(unregistered)
+   204→   204→            # 自动注册到 FSRS
+   205→   205→            fsrs.ensure_card(f"sentence_{sentence['id']}", card_type="sentence")
+   206→   206→            return _enrich_sentence(sentence)
+   207→   207→
+   208→   208→    except Exception as e:
+   209→   209→        print(f"[FSRS] 获取复习队列失败，回退到随机模式: {e}")
+   210→   210→
+   211→   211→    # 回退：随机选择
+   212→   212→    sentence = random.choice(PRESET_SENTENCES)
+   213→   213→    return _enrich_sentence(sentence)
+   214→   214→
+   215→   215→
+   216→   216→@app.get("/api/sentences")
+   217→   217→async def get_all_sentences():
+   218→   218→    """获取所有练习句子"""
+   219→   219→    return [_enrich_sentence(s) for s in PRESET_SENTENCES]
+   220→   220→
+   221→   221→
+   222→   222→@app.get("/api/sentence/{sentence_id}")
+   223→   223→async def get_sentence_by_id(sentence_id: int):
+   224→   224→    """按ID获取句子"""
+   225→   225→    for s in PRESET_SENTENCES:
+   226→   226→        if s["id"] == sentence_id:
+   227→   227→            return _enrich_sentence(s)
+   228→   228→    raise HTTPException(status_code=404, detail="句子不存在")
+   229→   229→
+   230→   230→
+   231→   231→@app.get("/api/minimal-pairs")
+   232→   232→async def get_minimal_pairs():
+   233→   233→    """获取最小对立对数据"""
+   234→   234→    return MINIMAL_PAIRS
+   235→   235→
+   236→   236→
+   237→   237→@app.get("/api/phoneme-tips")
+   238→   238→async def get_phoneme_tips():
+   239→   239→    """获取全部44个音素的发音指南"""
+   240→   240→    result = {}
+   241→   241→    for phoneme, info in PHONEME_TIPS.items():
+   242→   242→        result[phoneme] = {
+   243→   243→            "description": info["description"],
+   244→   244→            "ipa": info.get("ipa", ARPABET_TO_IPA.get(phoneme, "")),
+   245→   245→            "common_error": info["common_error"],
+   246→   246→            "solution": info["solution"],
+   247→   247→            "mouth_shape": info["mouth_shape"],
+   248→   248→            "practice_words": info.get("practice_words", []),
+   249→   249→        }
+   250→   250→    return result
+   251→   251→
+   252→   252→
+   253→   253→# ============================================================
+   254→   254→# FSRS 间隔重复 API
+   255→   255→# ============================================================
+   256→   256→
+   257→   257→@app.post("/api/fsrs/review")
+   258→   258→async def fsrs_review(data: dict):
+   259→   259→    """提交 FSRS 复习评分
+   260→   260→
+   261→   261→    Body: {"card_id": str, "rating": int(1-4), "card_type": "sentence"}
+   262→   262→    Rating: 1=Again, 2=Hard, 3=Good, 4=Easy
+   263→   263→    """
+   264→   264→    card_id = data.get("card_id")
+   265→   265→    rating = data.get("rating")
+   266→   266→    card_type = data.get("card_type", "sentence")
+   267→   267→
+   268→   268→    if not card_id:
+   269→   269→        raise HTTPException(status_code=400, detail="缺少 card_id")
+   270→   270→    if rating not in (1, 2, 3, 4):
+   271→   271→        raise HTTPException(status_code=400, detail="rating 必须为 1-4（Again/Hard/Good/Easy）")
+   272→   272→
+   273→   273→    try:
+   274→   274→        fsrs = get_fsrs_db()
+   275→   275→        result = fsrs.review_card(card_id, rating, card_type)
+   276→   276→        return result
+   277→   277→    except Exception as e:
+   278→   278→        raise HTTPException(status_code=500, detail=f"复习记录失败: {str(e)}")
+   279→   279→
+   280→   280→
+   281→   281→@app.get("/api/fsrs/queue")
+   282→   282→async def fsrs_queue(
+   283→   283→    card_type: str = Query("sentence", description="卡片类型"),
+   284→   284→    new_per_day: int = Query(5, description="每日新卡片数量"),
+   285→   285→):
+   286→   286→    """获取 FSRS 复习队列"""
+   287→   287→    try:
+   288→   288→        fsrs = get_fsrs_db()
+   289→   289→        queue = fsrs.get_review_queue(card_type=card_type, new_per_day=new_per_day)
+   290→   290→        return {"queue": queue, "total": len(queue)}
+   291→   291→    except Exception as e:
+   292→   292→        raise HTTPException(status_code=500, detail=f"获取复习队列失败: {str(e)}")
+   293→   293→
+   294→   294→
+   295→   295→@app.get("/api/fsrs/stats")
+   296→   296→async def fsrs_stats():
+   297→   297→    """获取 FSRS 学习统计"""
+   298→   298→    try:
+   299→   299→        fsrs = get_fsrs_db()
+   300→   300→        return fsrs.get_stats()
+   301→   301→    except Exception as e:
+   302→   302→        raise HTTPException(status_code=500, detail=f"获取统计失败: {str(e)}")
+   303→   303→
+   304→   304→
+   305→   305→@app.get("/api/fsrs/next")
+   306→   306→async def fsrs_next(card_type: str = Query("sentence", description="卡片类型")):
+   307→   307→    """获取下一个 FSRS 句子（复习队列优先，然后新句子）"""
+   308→   308→    try:
+   309→   309→        fsrs = get_fsrs_db()
+   310→   310→        queue = fsrs.get_review_queue(card_type=card_type, new_per_day=5)
+   311→   311→
+   312→   312→        if queue:
+   313→   313→            # 优先选择到期的复习卡片
+   314→   314→            review_cards = [q for q in queue if q["type"] == "review"]
+   315→   315→            new_cards = [q for q in queue if q["type"] == "new"]
+   316→   316→
+   317→   317→            chosen = None
+   318→   318→            if review_cards:
+   319→   319→                chosen = random.choice(review_cards)
+   320→   320→                sentence_type = "review"
+   321→   321→            elif new_cards:
+   322→   322→                chosen = random.choice(new_cards)
+   323→   323→                sentence_type = "new"
+   324→   324→
+   325→   325→            if chosen:
+   326→   326→                card_id = chosen["card_id"]
+   327→   327→                sentence = _find_sentence_by_card_id(card_id)
+   328→   328→                if sentence:
+   329→   329→                    result = _enrich_sentence(sentence)
+   330→   330→                    result["fsrs"] = chosen
+   331→   331→                    return {"sentence": result, "type": sentence_type}
+   332→   332→
+   333→   333→        # 如果队列为空，随机选择
+   334→   334→        sentence = random.choice(PRESET_SENTENCES)
+   335→   335→        result = _enrich_sentence(sentence)
+   336→   336→        return {"sentence": result, "type": "new"}
+   337→   337→
+   338→   338→    except Exception as e:
+   339→   339→        # 回退到随机
+   340→   340→        sentence = random.choice(PRESET_SENTENCES)
+   341→   341→        result = _enrich_sentence(sentence)
+   342→   342→        return {"sentence": result, "type": "new"}
+   343→   343→
+   344→   344→
+   345→   345→@app.get("/api/fsrs/due-count")
+   346→   346→async def fsrs_due_count(card_type: str = Query("sentence", description="卡片类型")):
+   347→   347→    """获取到期复习卡片数量"""
+   348→   348→    try:
+   349→   349→        fsrs = get_fsrs_db()
+   350→   350→        due_cards = fsrs.get_due_cards(card_type=card_type)
+   351→   351→        return {"count": len(due_cards)}
+   352→   352→    except Exception:
+   353→   353→        return {"count": 0}
+   354→   354→
+   355→   355→
+   356→   356→@app.post("/api/fsrs/ensure")
+   357→   357→async def fsrs_ensure(data: dict):
+   358→   358→    """确保卡片存在于 FSRS 数据库
+   359→   359→
+   360→   360→    Body: {"card_ids": [str], "card_type": "sentence"}
+   361→   361→    """
+   362→   362→    card_ids = data.get("card_ids", [])
+   363→   363→    card_type = data.get("card_type", "sentence")
+   364→   364→
+   365→   365→    if not card_ids:
+   366→   366→        raise HTTPException(status_code=400, detail="缺少 card_ids")
+   367→   367→
+   368→   368→    try:
+   369→   369→        fsrs = get_fsrs_db()
+   370→   370→        created = []
+   371→   371→        for card_id in card_ids:
+   372→   372→            fsrs.ensure_card(card_id, card_type)
+   373→   373→            created.append(card_id)
+   374→   374→        return {"created": created, "total": len(created)}
+   375→   375→    except Exception as e:
+   376→   376→        raise HTTPException(status_code=500, detail=f"创建卡片失败: {str(e)}")
+   377→   377→
+   378→   378→
+   379→   379→# ============================================================
+   380→   380→# IPA 标准发音音频 API（使用上传的 IPA 音频文件）
+   381→   381→# ============================================================
+   382→   382→
+   383→   383→# ARPAbet → IPA 音频文件映射
+   384→   384→_IPA_AUDIO_DIR = _SCRIPT_DIR / "ipa_audio"
+   385→   385→_ARPABET_TO_AUDIO = {
+   386→   386→    # Vowels
+   387→   387→    'AA': _IPA_AUDIO_DIR / "vowels" / "Open_back_unrounded_vowel_ɑ.ogg.mp3",
+   388→   388→    'AE': _IPA_AUDIO_DIR / "vowels" / "Near-open_front_unrounded_vowel_æ.ogg.mp3",
+   389→   389→    'AH': _IPA_AUDIO_DIR / "vowels" / "Mid-central_vowel_ə.ogg.mp3",
+   390→   390→    'AO': _IPA_AUDIO_DIR / "vowels" / "Open-mid_back_rounded_vowel_ɔ.ogg.mp3",
+   391→   391→    'AW': None,  # diphthong aʊ - no single file, will combine
+   392→   392→    'AY': None,  # diphthong aɪ - no single file
+   393→   393→    'EH': _IPA_AUDIO_DIR / "vowels" / "Open-mid_front_unrounded_vowel_ɛ.ogg.mp3",
+   394→   394→    'ER': _IPA_AUDIO_DIR / "vowels" / "Open-mid_central_unrounded_vowel_ɜ.ogg.mp3",
+   395→   395→    'EY': None,  # diphthong eɪ - no single file
+   396→   396→    'IH': _IPA_AUDIO_DIR / "vowels" / "Near-close_near-front_unrounded_vowel_ɪ.ogg.mp3",
+   397→   397→    'IY': _IPA_AUDIO_DIR / "vowels" / "Close_front_unrounded_vowel_i.ogg.mp3",
+   398→   398→    'OW': None,  # diphthong oʊ - no single file
+   399→   399→    'OY': None,  # diphthong ɔɪ - no single file
+   400→   400→    'UH': _IPA_AUDIO_DIR / "vowels" / "Near-close_near-back_rounded_vowel_ʊ.ogg.mp3",
+   401→   401→    'UW': _IPA_AUDIO_DIR / "vowels" / "Close_back_rounded_vowel_u.ogg.mp3",
+   402→   402→    # Consonants
+   403→   403→    'P': _IPA_AUDIO_DIR / "consonants" / "archive" / "Voiceless_bilabial_plosive.ogg.mp3",
+   404→   404→    'B': _IPA_AUDIO_DIR / "consonants" / "archive" / "Voiced_bilabial_plosive.ogg.mp3",
+   405→   405→    'T': _IPA_AUDIO_DIR / "consonants" / "Voiceless_alveolar_plosive_t.ogg.mp3",
+   406→   406→    'D': _IPA_AUDIO_DIR / "consonants" / "Voiced_alveolar_plosive_d.ogg.mp3",
+   407→   407→    'K': _IPA_AUDIO_DIR / "consonants" / "Voiceless_velar_plosive_k.ogg.mp3",
+   408→   408→    'G': _IPA_AUDIO_DIR / "consonants" / "Voiced_velar_plosive_g.ogg.mp3",
+   409→   409→    'F': _IPA_AUDIO_DIR / "consonants" / "Voiceless_labio-dental_fricative_f.ogg.mp3",
+   410→   410→    'V': _IPA_AUDIO_DIR / "consonants" / "Voiced_labio-dental_fricative_v.ogg.mp3",
+   411→   411→    'S': _IPA_AUDIO_DIR / "consonants" / "Voiceless_alveolar_sibilant_s.ogg.mp3",
+   412→   412→    'Z': _IPA_AUDIO_DIR / "consonants" / "Voiced_alveolar_sibilant_z.ogg.mp3",
+   413→   413→    'SH': _IPA_AUDIO_DIR / "consonants" / "Voiceless_palato-alveolar_sibilant_ʃ.ogg.mp3",
+   414→   414→    'ZH': _IPA_AUDIO_DIR / "consonants" / "Voiced_palato-alveolar_sibilant_ʒ.ogg.mp3",
+   415→   415→    'TH': _IPA_AUDIO_DIR / "consonants" / "Voiceless_dental_fricative_θ.ogg.mp3",
+   416→   416→    'DH': _IPA_AUDIO_DIR / "consonants" / "Voiced_dental_fricative_ð.ogg.mp3",
+   417→   417→    'CH': None,  # affricate tʃ - no single file
+   418→   418→    'JH': None,  # affricate dʒ - no single file
+   419→   419→    'M': _IPA_AUDIO_DIR / "consonants" / "Bilabial_nasal_m.ogg.mp3",
+   420→   420→    'N': _IPA_AUDIO_DIR / "consonants" / "Alveolar_nasal_n.ogg.mp3",
+   421→   421→    'NG': _IPA_AUDIO_DIR / "consonants" / "Velar_nasal_ŋ.ogg.mp3",
+   422→   422→    'L': _IPA_AUDIO_DIR / "consonants" / "Voiced_alveolar_lateral_approximant_l.ogg.mp3",
+   423→   423→    'R': _IPA_AUDIO_DIR / "consonants" / "archive" / "Alveolar_approximant_ɹ.ogg.mp3",
+   424→   424→    'W': _IPA_AUDIO_DIR / "consonants" / "archive" / "Voiced_labio-velar_approximant.ogg.mp3",
+   425→   425→    'Y': _IPA_AUDIO_DIR / "consonants" / "Voiced_palatal_approximant_j.ogg.mp3",
+   426→   426→    'HH': _IPA_AUDIO_DIR / "consonants" / "Voiced_glottal_fricative_h.ogg.mp3",
+   427→   427→}
+   428→   428→
+   429→   429→# Diphthong and affricate components (play two sounds sequentially)
+   430→   430→_DIPHTHONG_COMPONENTS = {
+   431→   431→    'AW': ('AA', 'UW'),   # aʊ
+   432→   432→    'AY': ('AA', 'IY'),   # aɪ
+   433→   433→    'EY': ('EH', 'IY'),   # eɪ
+   434→   434→    'OW': ('AO', 'UW'),   # oʊ
+   435→   435→    'OY': ('AO', 'IY'),   # ɔɪ
+   436→   436→    'CH': ('T', 'SH'),    # tʃ
+   437→   437→    'JH': ('D', 'ZH'),    # dʒ
+   438→   438→}
+   439→   439→
+   440→   440→
+   441→   441→@app.get("/api/ipa-audio/{arpabet}")
+   442→   442→async def ipa_audio_endpoint(arpabet: str):
+   443→   443→    """获取 ARPAbet 音素对应的标准 IPA 发音音频
+   444→   444→
+   445→   445→    优先使用上传的 IPA 音频文件（真实人声录音），
+   446→   446→    如果没有对应文件则回退到 TTS 合成。
+   447→   447→    """
+   448→   448→    arpabet = arpabet.upper().strip()
+   449→   449→
+   450→   450→    # 1. 直接查找对应音频文件
+   451→   451→    audio_path = _ARPABET_TO_AUDIO.get(arpabet)
+   452→   452→    if audio_path and audio_path.is_file():
+   453→   453→        return FileResponse(str(audio_path), media_type="audio/mpeg")
+   454→   454→
+   455→   455→    # 2. 双元音/塞擦音：返回第一个成分的音频（前端会顺序播放两个）
+   456→   456→    components = _DIPHTHONG_COMPONENTS.get(arpabet)
+   457→   457→    if components:
+   458→   458→        comp_paths = []
+   459→   459→        for comp in components:
+   460→   460→            p = _ARPABET_TO_AUDIO.get(comp)
+   461→   461→            if p and p.is_file():
+   462→   462→                comp_paths.append(f"/api/ipa-audio/{comp}")
+   463→   463→        if comp_paths:
+   464→   464→            return {
+   465→   465→                "type": "composite",
+   466→   466→                "components": comp_paths,
+   467→   467→                "message": f"/{ARPABET_TO_IPA.get(arpabet, arpabet)}/ is a diphthong/affricate, playing component sounds"
+   468→   468→            }
+   469→   469→
+   470→   470→    # 3. 回退到 TTS 合成
+   471→   471→    tts_path = generate_phoneme_audio(arpabet)
+   472→   472→    if tts_path and os.path.exists(tts_path):
+   473→   473→        media_type = "audio/mpeg" if tts_path.endswith(".mp3") else "audio/wav"
+   474→   474→        return FileResponse(tts_path, media_type=media_type)
+   475→   475→
+   476→   476→    raise HTTPException(status_code=404, detail=f"无音频: {arpabet}")
+   477→   477→
+   478→   478→
+   479→   479→@app.get("/api/ipa-audio-info")
+   480→   480→async def ipa_audio_info():
+   481→   481→    """返回所有可用的音素音频信息"""
+   482→   482→    available = {}
+   483→   483→    for arpabet, path in _ARPABET_TO_AUDIO.items():
+   484→   484→        if path and path.is_file():
+   485→   485→            available[arpabet] = {"file": path.name, "ipa": ARPABET_TO_IPA.get(arpabet, "")}
+   486→   486→        elif arpabet in _DIPHTHONG_COMPONENTS:
+   487→   487→            available[arpabet] = {
+   488→   488→                "file": "composite",
+   489→   489→                "components": list(_DIPHTHONG_COMPONENTS[arpabet]),
+   490→   490→                "ipa": ARPABET_TO_IPA.get(arpabet, "")
+   491→   491→            }
+   492→   492→    return {"total": len(available), "phonemes": available}
+   493→   493→
+   494→   494→
+   495→   495→# ============================================================
+   496→   496→# TTS 语音合成 API
+   497→   497→# ============================================================
+   498→   498→
+   499→   499→@app.get("/api/tts")
+   500→   500→async def tts_endpoint(text: str = Query(..., description="要合成语音的文本")):
+   501→   501→    """生成 TTS 音频并返回音频文件"""
+   502→   502→    result = generate_tts(text)
+   503→   503→    if "error" in result:
+   504→   504→        raise HTTPException(status_code=500, detail=result["error"])
+   505→   505→    media_type = "audio/mpeg" if result["format"] == "mp3" else "audio/wav"
+   506→   506→    return FileResponse(result["path"], media_type=media_type)
+   507→   507→
+   508→   508→
+   509→   509→@app.get("/api/tts/phoneme")
+   510→   510→async def tts_phoneme_endpoint(phoneme: str = Query(..., description="音素符号")):
+   511→   511→    """为单个音素生成发音音频（TTS 合成，音质不如 IPA 标准音频）
+   512→   512→
+   513→   513→    前端应优先使用 /api/ipa-audio/{arpabet} 获取真实人声发音
+   514→   514→    """
+   515→   515→    audio_path = generate_phoneme_audio(phoneme)
+   516→   516→    if not audio_path:
+   517→   517→        raise HTTPException(status_code=404, detail=f"无法为音素 '{phoneme}' 生成音频")
+   518→   518→    # 判断文件格式
+   519→   519→    if audio_path.endswith(".mp3"):
+   520→   520→        media_type = "audio/mpeg"
+   521→   521→    else:
+   522→   522→        media_type = "audio/wav"
+   523→   523→    return FileResponse(audio_path, media_type=media_type)
+   524→   524→
+   525→   525→
+   526→   526→@app.get("/api/tts/check")
+   527→   527→async def tts_check_endpoint():
+   528→   528→    """检查 TTS 引擎可用性"""
+   529→   529→    return check_tts_available()
+   530→   530→
+   531→   531→
+   532→   532→# ============================================================
+   533→   533→# 听写检查 API
+   534→   534→# ============================================================
+   535→   535→
+   536→   536→def _levenshtein_align(expected_words: list, user_words: list) -> list:
+   537→   537→    """使用 Levenshtein 距离算法对齐期望词和用户输入词
+   538→   538→
+   539→   539→    通过 DP 找到最优对齐，避免一一匹配导致的级联错误。
+   540→   540→    返回对齐结果列表，每个元素包含 expected, actual, correct, alignment_type
+   541→   541→    """
+   542→   542→    m, n = len(expected_words), len(user_words)
+   543→   543→
+   544→   544→    # DP 表：dp[i][j] = 将 expected[:i] 与 user[:j] 对齐的最小编辑距离
+   545→   545→    dp = [[0] * (n + 1) for _ in range(m + 1)]
+   546→   546→    trace = [[0] * (n + 1) for _ in range(m + 1)]  # 0=match/sub, 1=del, 2=ins
+   547→   547→
+   548→   548→    for i in range(1, m + 1):
+   549→   549→        dp[i][0] = dp[i - 1][0] + 1  # 删除代价
+   550→   550→        trace[i][0] = 1
+   551→   551→    for j in range(1, n + 1):
+   552→   552→        dp[0][j] = dp[0][j - 1] + 1  # 插入代价
+   553→   553→        trace[0][j] = 2
+   554→   554→
+   555→   555→    for i in range(1, m + 1):
+   556→   556→        for j in range(1, n + 1):
+   557→   557→            # 匹配或替换
+   558→   558→            cost = 0 if expected_words[i - 1] == user_words[j - 1] else 1
+   559→   559→            sub = dp[i - 1][j - 1] + cost
+   560→   560→            delete = dp[i - 1][j] + 1
+   561→   561→            insert = dp[i][j - 1] + 1
+   562→   562→
+   563→   563→            if sub <= delete and sub <= insert:
+   564→   564→                dp[i][j] = sub
+   565→   565→                trace[i][j] = 0
+   566→   566→            elif delete <= insert:
+   567→   567→                dp[i][j] = delete
+   568→   568→                trace[i][j] = 1
+   569→   569→            else:
+   570→   570→                dp[i][j] = insert
+   571→   571→                trace[i][j] = 2
+   572→   572→
+   573→   573→    # 回溯对齐
+   574→   574→    alignment = []
+   575→   575→    i, j = m, n
+   576→   576→    while i > 0 or j > 0:
+   577→   577→        if i > 0 and j > 0 and trace[i][j] == 0:
+   578→   578→            alignment.append((expected_words[i - 1], user_words[j - 1], "match" if expected_words[i - 1] == user_words[j - 1] else "substitution"))
+   579→   579→            i -= 1
+   580→   580→            j -= 1
+   581→   581→        elif i > 0 and trace[i][j] == 1:
+   582→   582→            alignment.append((expected_words[i - 1], "", "deletion"))
+   583→   583→            i -= 1
+   584→   584→        else:
+   585→   585→            alignment.append(("", user_words[j - 1], "insertion"))
+   586→   586→            j -= 1
+   587→   587→
+   588→   588→    alignment.reverse()
+   589→   589→    return alignment
+   590→   590→
+   591→   591→
+   592→   592→@app.post("/api/dictation/check")
+   593→   593→async def dictation_check(data: dict):
+   594→   594→    """听写对比检查（基于 Levenshtein 距离算法）
+   595→   595→
+   596→   596→    Body: {"text": "expected sentence", "sentence_text": "expected sentence", "user_input": "user typed" or ["word1", "word2"]}
+   597→   597→    返回逐词对比结果和准确率
+   598→   598→    """
+   599→   599→    expected = data.get("text", data.get("sentence_text", "")).lower().strip()
+   600→   600→    user_input_raw = data.get("user_input", "")
+   601→   601→    if isinstance(user_input_raw, list):
+   602→   602→        user_input = " ".join(str(w) for w in user_input_raw).lower().strip()
+   603→   603→    else:
+   604→   604→        user_input = str(user_input_raw).lower().strip()
+   605→   605→
+   606→   606→    expected_words = expected.split()
+   607→   607→    user_words = user_input.split()
+   608→   608→
+   609→   609→    # 使用 Levenshtein 距离对齐，避免级联错误
+   610→   610→    alignment = _levenshtein_align(expected_words, user_words)
+   611→   611→
+   612→   612→    results = []
+   613→   613→    for ew, uw, align_type in alignment:
+   614→   614→        if align_type == "match":
+   615→   615→            results.append({
+   616→   616→                "expected": ew,
+   617→   617→                "actual": uw,
+   618→   618→                "correct": True,
+   619→   619→                "type": "match",
+   620→   620→            })
+   621→   621→        elif align_type == "substitution":
+   622→   622→            results.append({
+   623→   623→                "expected": ew,
+   624→   624→                "actual": uw,
+   625→   625→                "correct": False,
+   626→   626→                "type": "substitution",
+   627→   627→            })
+   628→   628→        elif align_type == "deletion":
+   629→   629→            results.append({
+   630→   630→                "expected": ew,
+   631→   631→                "actual": "",
+   632→   632→                "correct": False,
+   633→   633→                "type": "deletion",
+   634→   634→            })
+   635→   635→        elif align_type == "insertion":
+   636→   636→            results.append({
+   637→   637→                "expected": "",
+   638→   638→                "actual": uw,
+   639→   639→                "correct": False,
+   640→   640→                "type": "insertion",
+   641→   641→            })
+   642→   642→
+   643→   643→    accuracy = sum(1 for r in results if r["correct"]) / max(len(expected_words), 1) * 100
+   644→   644→
+   645→   645→    return {
+   646→   646→        "results": results,
+   647→   647→        "accuracy": round(accuracy, 1),
+   648→   648→        "expected": expected,
+   649→   649→        "user_input": user_input,
+   650→   650→    }
+   651→   651→
+   652→   652→
+   653→   653→# ============================================================
+   654→   654→# 音频评测 API
+   655→   655→# ============================================================
+   656→   656→
+   657→   657→def _load_audio_file(file_path: str):
+   658→   658→    """
+   659→   659→    多格式音频加载，支持 WAV/FLAC/OGG/WebM/MP4 等
+   660→   660→
+   661→   661→    尝试顺序：
+   662→   662→    1. soundfile（支持 WAV/FLAC/OGG 等）
+   663→   663→    2. librosa.load()（支持更多格式，需 ffmpeg）
+   664→   664→    3. pydub 转码后 soundfile 读取（WebM/MP4 等需 ffmpeg）
+   665→   665→    4. subprocess ffmpeg 直接转码
+   666→   666→    """
+   667→   667→    import soundfile as sf
+   668→   668→    import librosa
+   669→   669→
+   670→   670→    # 尝试1：soundfile 直接读取
+   671→   671→    try:
+   672→   672→        audio_data, sr = sf.read(file_path)
+   673→   673→        if audio_data.ndim > 1:
+   674→   674→            audio_data = audio_data.mean(axis=-1)
+   675→   675→        if sr != 16000:
+   676→   676→            audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
+   677→   677→            sr = 16000
+   678→   678→        return audio_data.astype(np.float32), sr
+   679→   679→    except Exception:
+   680→   680→        pass
+   681→   681→
+   682→   682→    # 尝试2：librosa.load（内部使用 audioread，可能支持更多格式）
+   683→   683→    try:
+   684→   684→        audio_data, sr = librosa.load(file_path, sr=16000, mono=True)
+   685→   685→        return audio_data.astype(np.float32), 16000
+   686→   686→    except Exception:
+   687→   687→        pass
+   688→   688→
+   689→   689→    # 尝试3：pydub 转码
+   690→   690→    try:
+   691→   691→        from pydub import AudioSegment
+   692→   692→        from pydub.utils import which
+   693→   693→        if which("ffmpeg"):
+   694→   694→            audio_seg = AudioSegment.from_file(file_path)
+   695→   695→            audio_seg = audio_seg.set_frame_rate(16000).set_channels(1)
+   696→   696→            wav_path = file_path.rsplit('.', 1)[0] + "_converted.wav"
+   697→   697→            audio_seg.export(wav_path, format="wav")
+   698→   698→            try:
+   699→   699→                audio_data, sr = sf.read(wav_path)
+   700→   700→                if audio_data.ndim > 1:
+   701→   701→                    audio_data = audio_data.mean(axis=-1)
+   702→   702→                return audio_data.astype(np.float32), sr
+   703→   703→            finally:
+   704→   704→                if os.path.exists(wav_path):
+   705→   705→                    os.unlink(wav_path)
+   706→   706→    except Exception:
+   707→   707→        pass
+   708→   708→
+   709→   709→    # 尝试4：subprocess ffmpeg 直接转码
+   710→   710→    try:
+   711→   711→        import subprocess as sp
+   712→   712→        wav_path = file_path.rsplit('.', 1)[0] + "_converted.wav"
+   713→   713→        result = sp.run(
+   714→   714→            ["ffmpeg", "-y", "-i", file_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+   715→   715→            capture_output=True, timeout=30
+   716→   716→        )
+   717→   717→        if result.returncode == 0 and os.path.exists(wav_path):
+   718→   718→            try:
+   719→   719→                audio_data, sr = sf.read(wav_path)
+   720→   720→                if audio_data.ndim > 1:
+   721→   721→                    audio_data = audio_data.mean(axis=-1)
+   722→   722→                return audio_data.astype(np.float32), sr
+   723→   723→            finally:
+   724→   724→                if os.path.exists(wav_path):
+   725→   725→                    os.unlink(wav_path)
+   726→   726→    except Exception:
+   727→   727→        pass
+   728→   728→
+   729→   729→    raise RuntimeError(
+   730→   730→        "无法读取音频文件。请安装 ffmpeg 以支持 WebM/MP4 等格式。\n"
+   731→   731→        "Windows: 下载 https://ffmpeg.org/download.html 并添加到 PATH\n"
+   732→   732→        "或安装 pydub: pip install pydub"
+   733→   733→    )
+   734→   734→
+   735→   735→
+   736→   736→@app.post("/api/evaluate")
+   737→   737→async def evaluate_audio(
+   738→   738→    audio: UploadFile = File(...),
+   739→   739→    sentence_text: str = Form(...),
+   740→   740→):
+   741→   741→    """评测音频发音"""
+   742→   742→    try:
+   743→   743→        g2p = get_g2p_service()
+   744→   744→        expected_phonemes = g2p.text_to_phonemes(sentence_text)
+   745→   745→        word_phonemes = g2p.text_to_phonemes_with_words(sentence_text)
+   746→   746→
+   747→   747→        if not expected_phonemes:
+   748→   748→            raise HTTPException(status_code=400, detail="无法生成期望音素序列")
+   749→   749→
+   750→   750→        suffix = Path(audio.filename or "audio.wav").suffix or ".webm"
+   751→   751→        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+   752→   752→            content = await audio.read()
+   753→   753→            tmp.write(content)
+   754→   754→            tmp_path = tmp.name
+   755→   755→
+   756→   756→        try:
+   757→   757→            audio_float, sr = _load_audio_file(tmp_path)
+   758→   758→
+   759→   759→            recognizer = get_recognizer(MODEL_PATH)
+   760→   760→            result_dict = recognizer.recognize_with_timestamps(audio_float, sr)
+   761→   761→            actual_phonemes = result_dict["phonemes"]
+   762→   762→            timeline = result_dict["timeline"]
+   763→   763→            blank_segments = result_dict["blank_segments"]
+   764→   764→            total_duration = result_dict["total_duration"]
+   765→   765→
+   766→   766→            eval_result = evaluate_pronunciation(
+   767→   767→                expected_phonemes=expected_phonemes,
+   768→   768→                actual_phonemes=actual_phonemes,
+   769→   769→                word_boundaries=word_phonemes,
+   770→   770→                timeline=timeline,
+   771→   771→                blank_segments=blank_segments,
+   772→   772→                total_duration=total_duration,
+   773→   773→            )
+   774→   774→
+   775→   775→            tips = generate_error_tips(eval_result.errors)
+   776→   776→            response = result_to_dict(eval_result, tips)
+   777→   777→            response["sentence"] = sentence_text
+   778→   778→
+   779→   779→            # 添加单词详情
+   780→   780→            words = sentence_text.lower().split()
+   781→   781→            response["word_details"] = [_get_word_detail(w) for w in words]
+   782→   782→
+   783→   783→            return response
+   784→   784→        finally:
+   785→   785→            os.unlink(tmp_path)
+   786→   786→
+   787→   787→    except HTTPException:
+   788→   788→        raise
+   789→   789→    except Exception as e:
+   790→   790→        traceback.print_exc()
+   791→   791→        raise HTTPException(status_code=500, detail=f"评测失败: {str(e)}")
+   792→   792→
+   793→   793→
+   794→   794→# ============================================================
+   795→   795→# 辅助函数
+   796→   796→# ============================================================
+   797→   797→
+   798→   798→def _find_sentence_by_card_id(card_id: str):
+   799→   799→    """根据 FSRS 卡片 ID 查找对应的句子
+   800→   800→
+   801→   801→    支持格式: "sentence_{id}" 或直接使用句子文本
+   802→   802→    """
+   803→   803→    # 格式1: "sentence_{id}"
+   804→   804→    if card_id.startswith("sentence_"):
+   805→   805→        try:
+   806→   806→            sid = int(card_id.split("_", 1)[1])
+   807→   807→            for s in PRESET_SENTENCES:
+   808→   808→                if s["id"] == sid:
+   809→   809→                    return s
+   810→   810→        except (ValueError, IndexError):
+   811→   811→            pass
+   812→   812→
+   813→   813→    # 格式2: 直接使用句子文本作为 card_id
+   814→   814→    for s in PRESET_SENTENCES:
+   815→   815→        if s["text"] == card_id:
+   816→   816→            return s
+   817→   817→
+   818→   818→    return None
+   819→   819→
+   820→   820→
+   821→   821→def _enrich_sentence(sentence: dict) -> dict:
+   822→   822→    """为句子数据添加音素和单词详情，自动翻译缺失的翻译"""
+   823→   823→    text = sentence["text"]
+   824→   824→    cached = _phoneme_cache.get(text, {})
+   825→   825→
+   826→   826→    words = text.lower().split()
+   827→   827→    word_details = [_get_word_detail(w) for w in words]
+   828→   828→
+   829→   829→    # 自动翻译：如果没有翻译，尝试本地词典拼接
+   830→   830→    # 不再调用在线翻译服务（太慢，会阻塞页面加载）
+   831→   831→    translation = sentence.get("translation", "")
+   832→   832→    if not translation:
+   833→   833→        # 尝试从词典拼接简易翻译
+   834→   834→        try:
+   835→   835→            word_meanings = []
+   836→   836→            for w in words:
+   837→   837→                info = get_dict_service().lookup(w, local_only=True)
+   838→   838→                meaning = info.get("meaning", "")
+   839→   839→                if meaning:
+   840→   840→                    # 只取第一个释义的分号前部分
+   841→   841→                    short = meaning.split(";")[0].split("，")[0].strip()
+   842→   842→                    if short:
+   843→   843→                        word_meanings.append(short)
+   844→   844→            if word_meanings:
+   845→   845→                translation = "；".join(word_meanings)
+   846→   846→        except Exception:
+   847→   847→            pass
+   848→   848→
+   849→   849→    return {
+   850→   850→        "id": sentence["id"],
+   851→   851→        "text": text,
+   852→   852→        "translation": translation,
+   853→   853→        "difficulty": sentence.get("difficulty", "medium"),
+   854→   854→        "category": sentence.get("category", "general"),
+   855→   855→        "tags": sentence.get("tags", []),
+   856→   856→        "key_phrases": sentence.get("key_phrases", []),
+   857→   857→        "cultural_note": sentence.get("cultural_note", ""),
+   858→   858→        "phonemes": cached.get("phonemes", []),
+   859→   859→        "ipa": cached.get("ipa", ""),
+   860→   860→        "word_phonemes": cached.get("word_phonemes", []),
+   861→   861→        "word_details": word_details,
+   862→   862→    }
+   863→   863→
+   864→   864→
+   865→   865→def _get_word_detail(word: str) -> dict:
+   866→   866→    """获取单词详情（动态词典查询，仅本地数据避免阻塞）"""
+   867→   867→    dict_svc = get_dict_service()
+   868→   868→    info = dict_svc.lookup(word, local_only=True)
+   869→   869→
+   870→   870→    g2p = get_g2p_service()
+   871→   871→    arpabet = info.get("arpabet", [])
+   872→   872→    if not arpabet:
+   873→   873→        arpabet = g2p.text_to_phonemes(word)
+   874→   874→    ipa_from_g2p = G2PService.arpabet_to_ipa(arpabet) if arpabet else ""
+   875→   875→
+   876→   876→    # 从 endict 获取的音标（优先使用）
+   877→   877→    ipa_us = info.get("ipa_us", "")
+   878→   878→    ipa_uk = info.get("ipa_uk", "")
+   879→   879→
+   880→   880→    # 清理音标：去除可能存在的 // 包裹
+   881→   881→    if ipa_us.startswith("/") and ipa_us.endswith("/"):
+   882→   882→        ipa_us = ipa_us[1:-1]
+   883→   883→    if ipa_uk.startswith("/") and ipa_uk.endswith("/"):
+   884→   884→        ipa_uk = ipa_uk[1:-1]
+   885→   885→
+   886→   886→    # 优先使用 endict 的美式音标，否则使用 G2P 生成的
+   887→   887→    final_ipa = ipa_us or ipa_from_g2p
+   888→   888→
+   889→   889→    return {
+   890→   890→        "word": word,
+   891→   891→        "pos": info.get("pos", ""),
+   892→   892→        "meaning": info.get("meaning", ""),
+   893→   893→        "ipa": final_ipa,
+   894→   894→        "ipa_uk": ipa_uk,
+   895→   895→        "arpabet": arpabet,
+   896→   896→        "example": info.get("example", ""),
+   897→   897→        "examples": info.get("examples", []),
+   898→   898→        "frequency": info.get("frequency", 0),
+   899→   899→        "difficulty": info.get("difficulty", 0),
+   900→   900→        "memory_tip": info.get("memory_tip", ""),
+   901→   901→        "grammar_note": info.get("grammar_note", ""),
+   902→   902→        "source": info.get("source", "g2p"),
+   903→   903→    }
+   904→   904→
+   905→   905→
+   906→   906→# 挂载前端
+   907→   907→frontend_path = Path(__file__).parent.parent / "frontend"
+   908→   908→if frontend_path.exists():
+   909→   909→    app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="frontend")
+   910→   910→
+   911→   911→
+   912→   912→if __name__ == "__main__":
+   913→   913→    import uvicorn
+   914→   914→    uvicorn.run(app, host="0.0.0.0", port=8000)
+   915→   915→

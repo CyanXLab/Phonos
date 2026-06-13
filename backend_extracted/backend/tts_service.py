@@ -5,11 +5,8 @@
 """
 
 import os
-import sys
-import time
 import tempfile
 import hashlib
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -23,126 +20,41 @@ def _get_cache_path(text: str, voice: str = "en-US") -> str:
     return str(_cache_dir / f"{h}.mp3")
 
 
-# edge-tts 可用语音列表（按优先级排序）
-_EDGE_VOICES = [
-    "en-US-AriaNeural",    # 首选
-    "en-US-JennyNeural",   # 备选1
-    "en-US-GuyNeural",     # 备选2
-    "en-US-DavisNeural",   # 备选3
-]
-
-def tts_with_edge(text: str, voice: str = None) -> Optional[str]:
-    """使用 edge-tts 生成语音（免费、高质量、需联网）
-    
-    如果指定 voice 则只尝试该 voice，否则依次尝试多个 voice。
-    微软偶尔会封禁某个 voice 或 Token，多 voice 轮询可提高成功率。
-    """
+def tts_with_edge(text: str, voice: str = "en-US-AriaNeural") -> Optional[str]:
+    """使用 edge-tts 生成语音（免费、高质量、需联网）"""
     try:
         import edge_tts
-    except ImportError:
-        print("[TTS] edge-tts 未安装")
-        return None
+        cache_path = _get_cache_path(text, voice)
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100:
+            return cache_path
 
-    voices_to_try = [voice] if voice else _EDGE_VOICES
-    last_error = None
+        communicate = edge_tts.Communicate(text, voice)
+        communicate.save_sync(cache_path)
 
-    for v in voices_to_try:
-        if not v:
-            continue
-        cache_path = _get_cache_path(text, v)
-        try:
-            # 检查缓存
-            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100:
-                return cache_path
-
-            communicate = edge_tts.Communicate(text, v)
-            communicate.save_sync(cache_path)
-
-            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100:
-                return cache_path
-            else:
-                print(f"[TTS] edge-tts({v}) 生成的文件无效")
-                # 清理无效文件
-                try:
-                    os.remove(cache_path)
-                except Exception:
-                    pass
-        except Exception as e:
-            last_error = e
-            print(f"[TTS] edge-tts({v}) 失败: {e}")
-            # 清理可能残留的损坏缓存文件
-            if os.path.exists(cache_path):
-                try:
-                    os.remove(cache_path)
-                except Exception:
-                    pass
-            # 403/401 等鉴权错误，换一个 voice 试试
-            error_str = str(e)
-            if "403" in error_str or "401" in error_str or "Invalid response" in error_str:
-                print(f"[TTS] edge-tts({v}) 鉴权被拒，尝试下一个 voice...")
-                continue
-            else:
-                # 其他错误（网络超时等），不继续尝试
-                break
-
-    if last_error:
-        print(f"[TTS] 所有 edge-tts voice 均失败，最后一次错误: {last_error}")
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100:
+            return cache_path
+    except Exception:
+        pass
     return None
 
 
 # Flag to track if pyttsx3 actually works (not just importable)
 _pyttsx3_available = None
-_pyttsx3_check_lock = threading.Lock()
-
 
 def _check_pyttsx3_available() -> bool:
     """Test if pyttsx3 can actually initialize (not just import)
     
-    - Windows/macOS 桌面环境：pyttsx3 通常可以工作，启用它
-    - Linux headless/CI 环境：pyttsx3 可能因无音频设备而崩溃，禁用
-    - 可通过环境变量 PHONOS_PYTTSX3=1 强制启用，或 PHONOS_PYTTSX3=0 强制禁用
+    Note: In headless/server environments, pyttsx3.init() can cause crashes
+    because it tries to access audio devices. We disable it by default in
+    server environments and rely on browser TTS instead.
     """
     global _pyttsx3_available
-    with _pyttsx3_check_lock:
-        if _pyttsx3_available is not None:
-            return _pyttsx3_available
-
-        # 环境变量优先
-        env_val = os.environ.get("PHONOS_PYTTSX3", "").strip()
-        if env_val == "1":
-            _pyttsx3_available = True
-            print("[TTS] pyttsx3 通过环境变量强制启用")
-            return True
-        elif env_val == "0":
-            _pyttsx3_available = False
-            print("[TTS] pyttsx3 通过环境变量强制禁用")
-            return False
-
-        # 检测环境：Windows/macOS 桌面 → 启用；Linux headless → 禁用
-        is_desktop = (
-            sys.platform == "win32" or
-            sys.platform == "darwin" or
-            os.environ.get("DISPLAY") is not None or
-            os.environ.get("WAYLAND_DISPLAY") is not None
-        )
-
-        if not is_desktop:
-            _pyttsx3_available = False
-            print("[TTS] pyttsx3 在无头环境下自动禁用")
-            return False
-
-        # 桌面环境：尝试初始化 pyttsx3 验证可用性
-        try:
-            import pyttsx3
-            engine = pyttsx3.init()
-            engine.stop()
-            _pyttsx3_available = True
-            print("[TTS] pyttsx3 初始化成功，已启用")
-        except Exception as e:
-            _pyttsx3_available = False
-            print(f"[TTS] pyttsx3 初始化失败，已禁用: {e}")
-
+    if _pyttsx3_available is not None:
         return _pyttsx3_available
+    # Disable pyttsx3 in server environments - it causes crashes
+    # Browser TTS is the primary method anyway
+    _pyttsx3_available = False
+    return False
 
 
 def tts_with_pyttsx3(text: str) -> Optional[str]:
@@ -166,105 +78,32 @@ def tts_with_pyttsx3(text: str) -> Optional[str]:
         engine.setProperty('rate', 140)
         engine.save_to_file(text, cache_path)
         engine.runAndWait()
-        engine.stop()  # 确保释放资源
 
         if os.path.exists(cache_path) and os.path.getsize(cache_path) > 100:
             return cache_path
-        else:
-            print(f"[TTS] pyttsx3 生成的文件无效: {cache_path}")
-    except Exception as e:
-        print(f"[TTS] pyttsx3 失败: {e}")
-        # 标记为不可用，避免反复尝试
-        global _pyttsx3_available
-        _pyttsx3_available = False
+    except Exception:
+        pass
     return None
-
-
-# edge-tts 连续失败计数与冷却（类似翻译服务的降级机制）
-_edge_fail_count = 0
-_edge_fail_lock = threading.Lock()
-_EDGE_SKIP_THRESHOLD = 3      # 连续失败 N 次后跳过 edge-tts
-_EDGE_COOLDOWN_SEC = 300      # 冷却时间（秒）
-_edge_skip_until = 0.0
-
-
-def _record_edge_success():
-    """edge-tts 调用成功，重置失败计数"""
-    global _edge_fail_count, _edge_skip_until
-    with _edge_fail_lock:
-        _edge_fail_count = 0
-        _edge_skip_until = 0.0
-
-
-def _record_edge_failure():
-    """edge-tts 调用失败，增加计数；达到阈值后进入冷却期"""
-    global _edge_fail_count, _edge_skip_until
-    with _edge_fail_lock:
-        _edge_fail_count += 1
-        if _edge_fail_count >= _EDGE_SKIP_THRESHOLD:
-            _edge_skip_until = time.time() + _EDGE_COOLDOWN_SEC
-            print(f"[TTS] edge-tts 连续失败 {_edge_fail_count} 次，冷却 {_EDGE_COOLDOWN_SEC}s")
-
-
-def _should_skip_edge() -> bool:
-    """是否应该跳过 edge-tts（因为连续失败太多）"""
-    global _edge_fail_count, _edge_skip_until
-    with _edge_fail_lock:
-        if _edge_fail_count < _EDGE_SKIP_THRESHOLD:
-            return False
-        if time.time() > _edge_skip_until:
-            # 冷却期已过，重置计数，允许再次尝试
-            _edge_fail_count = 0
-            _edge_skip_until = 0.0
-            return False
-        return True
 
 
 def generate_tts(text: str) -> dict:
     """
     生成 TTS 音频文件
 
-    优先级：edge-tts（在线）→ pyttsx3（离线）→ 生成简短静音提示
-    edge-tts 连续失败 ≥ 3 次后进入 5 分钟冷却期，期间跳过在线 TTS。
-
     返回: {"path": str, "format": str, "source": str} 或 {"error": str}
     """
     if not text or not text.strip():
         return {"error": "文本为空"}
 
-    # 尝试 edge-tts（除非连续失败太多进入冷却期）
-    if not _should_skip_edge():
-        path = tts_with_edge(text)
-        if path:
-            _record_edge_success()
-            return {"path": path, "format": "mp3", "source": "edge-tts"}
-        else:
-            _record_edge_failure()
-    else:
-        print(f"[TTS] edge-tts 冷却中，跳过在线 TTS")
+    # 尝试 edge-tts
+    path = tts_with_edge(text)
+    if path:
+        return {"path": path, "format": "mp3", "source": "edge-tts"}
 
     # 尝试 pyttsx3
     path = tts_with_pyttsx3(text)
     if path:
         return {"path": path, "format": "wav", "source": "pyttsx3"}
-
-    # 最后的降级：生成一个极短的静音 WAV 文件，避免前端 500 错误
-    # 前端检测到 source=none 后可以回退到浏览器 SpeechSynthesis
-    try:
-        import struct, wave
-        silence_path = _get_cache_path(text, "silence").replace(".mp3", ".wav")
-        if not os.path.exists(silence_path):
-            with wave.open(silence_path, 'w') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(16000)
-                # 写入 0.1 秒静音
-                silence_data = struct.pack('<' + 'h' * 1600, *([0] * 1600))
-                wf.writeframes(silence_data)
-        return {"path": silence_path, "format": "wav", "source": "none",
-                "fallback": "browser_speech"}
-    except Exception:
-        pass
 
     return {"error": "所有 TTS 引擎均不可用，请安装 edge-tts 或 pyttsx3"}
 

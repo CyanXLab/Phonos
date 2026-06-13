@@ -1,0 +1,19 @@
+{
+  "code": 200,
+  "data": {
+    "description": "",
+    "html": "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\">{\n  \"JavaScript\": 214177,\n  \"Python\": 153250,\n  \"CSS\": 5545,\n  \"Dockerfile\": 1396,\n  \"Mako\": 469,\n  \"Makefile\": 460,\n  \"HTML\": 293,\n  \"Shell\": 171\n}\n</pre></body></html>",
+    "publishedTime": "Sat, 13 Jun 2026 10:30:07 GMT",
+    "title": "",
+    "url": "https://api.github.com/repos/xialeistudio/echoic/languages",
+    "usage": {
+      "tokens": 108
+    }
+  },
+  "meta": {
+    "usage": {
+      "tokens": 108
+    }
+  },
+  "status": 20000
+}
