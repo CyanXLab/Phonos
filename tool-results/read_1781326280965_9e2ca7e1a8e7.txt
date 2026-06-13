@@ -1,0 +1,2002 @@
+     1→/**
+     2→ * Phonos 口语练习平台 - 前端逻辑
+     3→ *
+     4→ * 功能：句子获取(FSRS队列)、TTS(浏览器+服务端回退)、IPA点击发音(标准IPA音频)、
+     5→ *       听写模式(倍速播放)、录音+波形可视化、回放、评测、评分展示、音素对比、
+     6→ *       错误诊断、单词学习、FSRS评级、学习统计、音素指南
+     7→ */
+     8→
+     9→const API = '';
+    10→
+    11→// ============================================================
+    12→// ARPAbet → IPA mapping
+    13→// ============================================================
+    14→const ARPABET_TO_IPA = {
+    15→    'AA':'ɑ','AE':'æ','AH':'ʌ','AO':'ɔ','AW':'aʊ','AY':'aɪ',
+    16→    'EH':'ɛ','ER':'ɝ','EY':'eɪ','IH':'ɪ','IY':'i','OW':'oʊ',
+    17→    'OY':'ɔɪ','UH':'ʊ','UW':'u',
+    18→    'P':'p','B':'b','T':'t','D':'d','K':'k','G':'ɡ',
+    19→    'F':'f','V':'v','S':'s','Z':'z','SH':'ʃ','ZH':'ʒ','TH':'θ','DH':'ð',
+    20→    'CH':'tʃ','JH':'dʒ',
+    21→    'M':'m','N':'n','NG':'ŋ',
+    22→    'L':'l','R':'r','W':'w','Y':'j','HH':'h',
+    23→};
+    24→
+    25→// Diphthong/affricate component mapping (for sequential playback)
+    26→const DIPHTHONG_COMPONENTS = {
+    27→    'AW': ['AA', 'UW'],
+    28→    'AY': ['AA', 'IY'],
+    29→    'EY': ['EH', 'IY'],
+    30→    'OW': ['AO', 'UW'],
+    31→    'OY': ['AO', 'IY'],
+    32→    'CH': ['T', 'SH'],
+    33→    'JH': ['D', 'ZH'],
+    34→};
+    35→
+    36→// ============================================================
+    37→// State
+    38→// ============================================================
+    39→const S = {
+    40→    sentence: null,
+    41→    recording: false,
+    42→    mediaRec: null,
+    43→    audioCtx: null,
+    44→    analyser: null,
+    45→    stream: null,
+    46→    chunks: [],
+    47→    recStart: 0,
+    48→    recTimer: null,
+    49→    animFrame: null,
+    50→    recordedBlob: null,
+    51→    recordedUrl: null,
+    52→    playbackPlaying: false,
+    53→    wordsExpanded: false,
+    54→    ipaVisible: false,
+    55→    phonemeTips: null,
+    56→    // --- New state ---
+    57→    mode: 'dictation',          // 'dictation' | 'practice'
+    58→    ttsFailCount: 0,
+    59→    ttsMode: 'server',         // 'browser' | 'server' — 默认用服务端Edge TTS（质量更好）
+    60→    dictationResults: null,     // { words: [...], checked: bool }
+    61→    _dictationErrorWords: null, // Backend error words with similarity info
+    62→    fsrsRated: false,           // whether user has rated this sentence
+    63→    sentenceType: 'new',        // 'new' | 'review'
+    64→    pendingReviewCount: 0,
+    65→    pendingWordReviewCount: 0,
+    66→    ttsSpeed: 1.0,              // TTS playback speed for dictation
+    67→    phonemeAudioCache: {},      // Cache for IPA audio blobs
+    68→    // --- Auth state ---
+    69→    user: null,                 // {id, username, display_name, avatar_color, settings}
+    70→    authToken: null,            // Bearer token
+    71→    serverStats: null,          // Server-side per-user stats (from DB, cross-browser sync)
+    72→    weaknessProfile: null,      // User's weakness analysis
+    73→    // --- Learning mode state ---
+    74→    learningMode: 'smart',       // 'smart' | 'sequential'
+    75→    modeStatus: null,            // cached /api/mode/status response
+    76→    wordReviewQueue: [],         // Word review queue items
+    77→    wordReviewIndex: 0,          // Current index in review queue
+    78→    wordReviewTotal: 0,          // Total items in review queue
+    79→    wordReviewSkippedIds: [],    // card_ids already reviewed in this session (avoid repeat)
+    80→    wordPracticeSkippedWords: [], // words already practiced in this session
+    81→};
+    82→
+    83→// 统计数据全部存储在服务端数据库中，跨浏览器自动同步
+    84→// 前端不再使用 localStorage 存储统计，所有数据从 /api/stats 获取
+    85→
+    86→// ============================================================
+    87→// Auth helpers
+    88→// ============================================================
+    89→function loadAuth() {
+    90→    try {
+    91→        const token = localStorage.getItem('phonos_auth_token');
+    92→        const user = localStorage.getItem('phonos_user');
+    93→        if (token && user) {
+    94→            S.authToken = token;
+    95→            S.user = JSON.parse(user);
+    96→            return true;
+    97→        }
+    98→    } catch {}
+    99→    return false;
+   100→}
+   101→
+   102→function saveAuth(token, user) {
+   103→    S.authToken = token;
+   104→    S.user = user;
+   105→    try {
+   106→        localStorage.setItem('phonos_auth_token', token);
+   107→        localStorage.setItem('phonos_user', JSON.stringify(user));
+   108→    } catch {}
+   109→}
+   110→
+   111→function clearAuth() {
+   112→    S.authToken = null;
+   113→    S.user = null;
+   114→    try {
+   115→        localStorage.removeItem('phonos_auth_token');
+   116→        localStorage.removeItem('phonos_user');
+   117→    } catch {}
+   118→}
+   119→
+   120→async function fetchWithAuth(url, options = {}) {
+   121→    if (S.authToken) {
+   122→        if (!options.headers) options.headers = {};
+   123→        options.headers['Authorization'] = `Bearer ${S.authToken}`;
+   124→    }
+   125→    return fetch(url, options);
+   126→}
+   127→
+   128→async function validateToken() {
+   129→    if (!S.authToken) return false;
+   130→    try {
+   131→        const r = await fetchWithAuth(`${API}/api/auth/me`);
+   132→        if (r.ok) {
+   133→            S.user = await r.json();
+   134→            return true;
+   135→        } else {
+   136→            clearAuth();
+   137→            return false;
+   138→        }
+   139→    } catch {
+   140→        return false;
+   141→    }
+   142→}
+   143→
+   144→async function doLogin(username, password) {
+   145→    const r = await fetch(`${API}/api/auth/login`, {
+   146→        method: 'POST',
+   147→        headers: { 'Content-Type': 'application/json' },
+   148→        body: JSON.stringify({ username, password }),
+   149→    });
+   150→    if (!r.ok) {
+   151→        const d = await r.json().catch(() => ({}));
+   152→        throw new Error(d.detail || '登录失败');
+   153→    }
+   154→    const data = await r.json();
+   155→    saveAuth(data.token, data.user);
+   156→    return data;
+   157→}
+   158→
+   159→async function doRegister(username, password, display_name) {
+   160→    const r = await fetch(`${API}/api/auth/register`, {
+   161→        method: 'POST',
+   162→        headers: { 'Content-Type': 'application/json' },
+   163→        body: JSON.stringify({ username, password, display_name }),
+   164→    });
+   165→    if (!r.ok) {
+   166→        const d = await r.json().catch(() => ({}));
+   167→        throw new Error(d.detail || '注册失败');
+   168→    }
+   169→    const data = await r.json();
+   170→    saveAuth(data.token, data.user);
+   171→    return data;
+   172→}
+   173→
+   174→async function doLogout() {
+   175→    if (S.authToken) {
+   176→        try { await fetchWithAuth(`${API}/api/auth/logout`, { method: 'POST' }); } catch {}
+   177→    }
+   178→    clearAuth();
+   179→}
+   180→
+   181→async function doGuestLogin() {
+   182→    // No login needed, just clear auth and use default user
+   183→    clearAuth();
+   184→}
+   185→
+   186→function updateUserProfileUI() {
+   187→    const profile = document.getElementById('userProfile');
+   188→    const avatar = document.getElementById('userAvatar');
+   189→    const name = document.getElementById('userName');
+   190→    if (!profile || !avatar || !name) return;
+   191→
+   192→    if (S.user && S.user.id !== 'default') {
+   193→        profile.style.display = 'flex';
+   194→        avatar.style.background = S.user.avatar_color || '#6b7280';
+   195→        avatar.textContent = (S.user.display_name || S.user.username || '?')[0].toUpperCase();
+   196→        name.textContent = S.user.display_name || S.user.username;
+   197→    } else {
+   198→        profile.style.display = 'flex';
+   199→        avatar.style.background = '#6b7280';
+   200→        avatar.textContent = '?';
+   201→        name.textContent = '访客';
+   202→    }
+   203→
+   204→    // Apply user settings (TTS/translation priority, etc.)
+   205→    const settings = getUserSettings();
+   206→    if (settings.ttsPriority) {
+   207→        S.ttsMode = settings.ttsPriority === 'server' ? 'server' : 'browser';
+   208→    }
+   209→}
+   210→
+   211→function showAuthModal(mode = 'login') {
+   212→    const modal = document.getElementById('authModal');
+   213→    if (!modal) return;
+   214→    modal.style.display = 'flex';
+   215→
+   216→    const loginForm = document.getElementById('loginForm');
+   217→    const registerForm = document.getElementById('registerForm');
+   218→    const authTitle = document.getElementById('authTitle');
+   219→
+   220→    loginForm.style.display = 'none';
+   221→    registerForm.style.display = 'none';
+   222→
+   223→    if (mode === 'login') {
+   224→        loginForm.style.display = '';
+   225→        authTitle.textContent = '登录';
+   226→    } else if (mode === 'register') {
+   227→        registerForm.style.display = '';
+   228→        authTitle.textContent = '注册';
+   229→    }
+   230→}
+   231→
+   232→function hideAuthModal() {
+   233→    const modal = document.getElementById('authModal');
+   234→    if (modal) modal.style.display = 'none';
+   235→}
+   236→
+   237→// 不再提供用户列表功能，不暴露其他用户信息
+   238→// 每个用户只看自己的数据，跨浏览器通过服务端数据库同步
+   239→
+   240→async function loadWeaknessProfile() {
+   241→    if (!S.authToken) return;
+   242→    try {
+   243→        const r = await fetchWithAuth(`${API}/api/learning/weakness-profile`);
+   244→        if (r.ok) S.weaknessProfile = await r.json();
+   245→    } catch {}
+   246→}
+   247→
+   248→async function loadServerStats() {
+   249→    try {
+   250→        const r = await fetchWithAuth(`${API}/api/stats`);
+   251→        if (r.ok) {
+   252→            S.serverStats = await r.json();
+   253→            return S.serverStats;
+   254→        }
+   255→    } catch {}
+   256→    return null;
+   257→}
+   258→
+   259→// ============================================================
+   260→// DOM
+   261→// ============================================================
+   262→const $ = id => document.getElementById(id);
+   263→const el = {
+   264→    statusDot: $('statusDot'), sentenceEn: $('sentenceEn'), sentenceZh: $('sentenceZh'),
+   265→    diffBadge: $('diffBadge'), reviewBadge: $('reviewBadge'),
+   266→    ipaSection: $('ipaSection'), ipaPhonemes: $('ipaPhonemes'),
+   267→    phrasesSection: $('phrasesSection'),
+   268→    phrasesList: $('phrasesList'), culturalNote: $('culturalNote'),
+   269→    btnRefresh: $('btnRefresh'), btnTTS: $('btnTTS'), btnToggleIPA: $('btnToggleIPA'),
+   270→    wordsList: $('wordsList'), btnToggleWords: $('btnToggleWords'),
+   271→    // Dictation
+   272→    dictationCard: $('dictationCard'), dictationInputs: $('dictationInputs'),
+   273→    dictationActions: $('dictationActions'), btnDictationCheck: $('btnDictationCheck'),
+   274→    dictationResults: $('dictationResults'), dictationTransition: $('dictationTransition'),
+   275→    btnStartPractice: $('btnStartPractice'), btnTTSDictation: $('btnTTSDictation'),
+   276→    dictationPhase: $('dictationPhase'),
+   277→    speedBtns: document.querySelectorAll('.speed-btn'),
+   278→    // Recording
+   279→    waveformCanvas: $('waveformCanvas'), waveformPlaceholder: $('waveformPlaceholder'),
+   280→    btnRecord: $('btnRecord'), recDot: $('recDot'), recLabel: $('recLabel'),
+   281→    recInfo: $('recInfo'), recTime: $('recTime'),
+   282→    playbackBar: $('playbackBar'), btnPlayback: $('btnPlayback'),
+   283→    playbackFill: $('playbackFill'), playbackTime: $('playbackTime'),
+   284→    btnSubmit: $('btnSubmit'), playbackAudio: $('playbackAudio'),
+   285→    recordingCard: $('recordingCard'),
+   286→    loadingCard: $('loadingCard'), resultCard: $('resultCard'),
+   287→    overallScore: $('overallScore'), scoreRing: $('scoreRing'),
+   288→    pronFill: $('pronFill'), pronVal: $('pronVal'),
+   289→    compFill: $('compFill'), compVal: $('compVal'),
+   290→    fluFill: $('fluFill'), fluVal: $('fluVal'),
+   291→    wordScoreGrid: $('wordScoreGrid'),
+   292→    phExpected: $('phExpected'), phActual: $('phActual'),
+   293→    fluDuration: $('fluDuration'), fluRate: $('fluRate'),
+   294→    fluPauses: $('fluPauses'), fluPauseDur: $('fluPauseDur'),
+   295→    tipsList: $('tipsList'),
+   296→    btnRetry: $('btnRetry'), btnNext: $('btnNext'),
+   297→    // FSRS
+   298→    fsrsSection: $('fsrsSection'),
+   299→    // Header
+   300→    reviewCounter: $('reviewCounter'), reviewCount: $('reviewCount'),
+   301→    btnStats: $('btnStats'), btnPhonemeGuide: $('btnPhonemeGuide'),
+   302→    phonemeModal: $('phonemeModal'), phonemeModalBody: $('phonemeModalBody'),
+   303→    closePhonemeModal: $('closePhonemeModal'),
+   304→    statsModal: $('statsModal'), statsModalBody: $('statsModalBody'),
+   305→    closeStatsModal: $('closeStatsModal'),
+   306→    // TTS audio element
+   307→    ttsAudio: $('ttsAudio'),
+   308→    // Mode selector
+   309→    modeSelector: $('modeSelector'), btnModeSmart: $('btnModeSmart'),
+   310→    btnModeSequential: $('btnModeSequential'), btnModeSettings: $('btnModeSettings'),
+   311→    // ID range dialog
+   312→    idRangeModal: $('idRangeModal'), closeIdRangeModal: $('closeIdRangeModal'),
+   313→    idRangeStart: $('idRangeStart'), idRangeEnd: $('idRangeEnd'),
+   314→    idRangeInfo: $('idRangeInfo'), idRangeError: $('idRangeError'),
+   315→    btnIdRangeConfirm: $('btnIdRangeConfirm'),
+   316→    // Data change banner
+   317→    dataChangeBanner: $('dataChangeBanner'), btnCloseDataChangeBanner: $('btnCloseDataChangeBanner'),
+   318→    // Word review modal
+   319→    wordReviewModal: $('wordReviewModal'), closeWordReviewModal: $('closeWordReviewModal'),
+   320→    wordReviewProgress: $('wordReviewProgress'), wordReviewEmpty: $('wordReviewEmpty'),
+   321→    wordReviewCards: $('wordReviewCards'),
+   322→    btnWordReview: $('btnWordReview'),
+   323→    btnWordPractice: $('btnWordPractice'),
+   324→};
+   325→
+   326→// ============================================================
+   327→// Init
+   328→// ============================================================
+   329→async function init() {
+   330→    // Show loading state immediately
+   331→    el.sentenceEn.textContent = '加载中...';
+   332→    el.diffBadge.textContent = '...';
+   333→    el.diffBadge.className = 'diff-badge';
+   334→    el.reviewBadge.style.display = 'none';
+   335→    el.dictationCard.style.display = 'none';
+   336→    el.recordingCard.style.display = 'none';
+   337→
+   338→    initCanvas();
+   339→    bindEvents();
+   340→
+   341→    // Load learning mode from localStorage
+   342→    loadLearningMode();
+   343→
+   344→    // Auth: try to load saved token
+   345→    const hasAuth = loadAuth();
+   346→    if (hasAuth && S.authToken) {
+   347→        // Validate token with server
+   348→        const valid = await validateToken();
+   349→        if (!valid) {
+   350→            // Token expired, but don't force login - just use guest mode
+   351→            clearAuth();
+   352→        }
+   353→    }
+   354→    updateUserProfileUI();
+   355→
+   356→    // Non-critical: load in parallel, don't block
+   357→    checkHealth();
+   358→    loadPhonemeTips();
+   359→    fetchReviewCount();
+   360→    // Fetch mode status BEFORE loading sentence (sequential mode needs start_id/end_id)
+   361→    await fetchModeStatus();
+   362→
+   363→    // Load weakness profile if logged in
+   364→    if (S.authToken) loadWeaknessProfile();
+   365→
+   366→    // Critical: load sentence (with timeout protection)
+   367→    try {
+   368→        await Promise.race([
+   369→            loadSentence(),
+   370→            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000))
+   371→        ]);
+   372→    } catch (e) {
+   373→        el.sentenceEn.textContent = '加载超时，请点击刷新重试';
+   374→        el.diffBadge.textContent = '--';
+   375→        console.error('Sentence loading failed:', e);
+   376→    }
+   377→}
+   378→
+   379→async function checkHealth() {
+   380→    try {
+   381→        const r = await fetch(`${API}/api/health`);
+   382→        const d = await r.json();
+   383→        el.statusDot.className = 'status-dot' + (d.model_loaded ? ' online' : '');
+   384→    } catch { el.statusDot.className = 'status-dot'; }
+   385→}
+   386→
+   387→async function loadPhonemeTips() {
+   388→    try {
+   389→        const r = await fetch(`${API}/api/phoneme-tips`);
+   390→        S.phonemeTips = await r.json();
+   391→    } catch { S.phonemeTips = null; }
+   392→}
+   393→
+   394→async function fetchReviewCount() {
+   395→    try {
+   396→        // Fetch both sentence and word due counts
+   397→        const [sentenceR, wordR] = await Promise.all([
+   398→            fetchWithAuth(`${API}/api/fsrs/due-count?card_type=sentence`),
+   399→            fetchWithAuth(`${API}/api/fsrs/due-count?card_type=word`)
+   400→        ]);
+   401→        if (sentenceR.ok) {
+   402→            const d = await sentenceR.json();
+   403→            S.pendingReviewCount = d.count || 0;  // sentence due count
+   404→        }
+   405→        if (wordR.ok) {
+   406→            const d = await wordR.json();
+   407→            // total_reviewable: 可练习总数（新词+待复习，不含已掌握）
+   408→            S.pendingWordReviewCount = d.total_reviewable || d.pending_count || d.count || 0;
+   409→        }
+   410→        updateReviewCounter();
+   411→    } catch { /* ignore */ }
+   412→}
+   413→
+   414→function updateReviewCounter() {
+   415→    if (S.pendingReviewCount > 0) {
+   416→        el.reviewCounter.style.display = 'flex';
+   417→        el.reviewCount.textContent = S.pendingReviewCount;
+   418→    } else {
+   419→        el.reviewCounter.style.display = 'none';
+   420→    }
+   421→}
+   422→
+   423→// ============================================================
+   424→// Sentence Loading (FSRS queue preferred)
+   425→// ============================================================
+   426→async function loadSentence(forceNew = false) {
+   427→    const prevId = S.sentence ? S.sentence.id : null;
+   428→
+   429→    // Show loading indicator
+   430→    el.sentenceEn.textContent = '加载中...';
+   431→    el.diffBadge.textContent = '...';
+   432→
+   433→    try {
+   434→        let loaded = false;
+   435→
+   436→        // forceNew: always get a different random sentence
+   437→        if (forceNew) {
+   438→            try {
+   439→                const seed = Date.now();
+   440→                const r = await fetchWithAuth(`${API}/api/sentence?force_new=true&_t=${seed}`, {signal: AbortSignal.timeout(10000)});
+   441→                if (r.ok) {
+   442→                    const data = await r.json();
+   443→                    if (data && data.id && data.id !== prevId) {
+   444→                        S.sentence = data;
+   445→                        S.sentenceType = 'new';
+   446→                        loaded = true;
+   447→                    }
+   448→                }
+   449→            } catch { /* fallback below */ }
+   450→        }
+   451→
+   452→        // Use mode-specific endpoint when not forceNew
+   453→        if (!loaded && !forceNew) {
+   454→            try {
+   455→                if (S.learningMode === 'sequential') {
+   456→                    // Sequential mode
+   457→                    let url = `${API}/api/mode/sequential/next`;
+   458→                    if (S.modeStatus && S.modeStatus.start_id) {
+   459→                        url += `?start_id=${S.modeStatus.start_id}`;
+   460→                        if (S.modeStatus.end_id) url += `&end_id=${S.modeStatus.end_id}`;
+   461→                    }
+   462→                    const r = await fetchWithAuth(url, {signal: AbortSignal.timeout(8000)});
+   463→                    if (r.ok) {
+   464→                        const d = await r.json();
+   465→                        if (d.sentence) {
+   466→                            S.sentence = d.sentence;
+   467→                            S.sentenceType = d.type || 'new';
+   468→                            loaded = true;
+   469→                            // Check for data change
+   470→                            if (d.data_changed) {
+   471→                                showDataChangeBanner();
+   472→                            }
+   473→                        }
+   474→                    }
+   475→                } else {
+   476→                    // Smart mode (FSRS-based)
+   477→                    const r = await fetchWithAuth(`${API}/api/mode/smart/next`, {signal: AbortSignal.timeout(8000)});
+   478→                    if (r.ok) {
+   479→                        const d = await r.json();
+   480→                        if (d.sentence) {
+   481→                            S.sentence = d.sentence;
+   482→                            S.sentenceType = d.type || 'new';
+   483→                            loaded = true;
+   484→                        }
+   485→                    }
+   486→                }
+   487→            } catch { /* fallback below */ }
+   488→        }
+   489→
+   490→        // Fallback: try FSRS queue
+   491→        if (!loaded && !forceNew) {
+   492→            try {
+   493→                const r = await fetchWithAuth(`${API}/api/fsrs/next`, {signal: AbortSignal.timeout(8000)});
+   494→                if (r.ok) {
+   495→                    const d = await r.json();
+   496→                    if (d.sentence) {
+   497→                        S.sentence = d.sentence;
+   498→                        S.sentenceType = d.type || 'new';
+   499→                        loaded = true;
+   500→                    }
+   501→                }
+   502→            } catch { /* fallback below */ }
+   503→        }
+   504→
+   505→        // Final fallback: get a random sentence (ensure different from previous)
+   506→        if (!loaded) {
+   507→            let attempts = 0;
+   508→            do {
+   509→                try {
+   510→                    const seed = Date.now() + attempts;
+   511→                    const r = await fetchWithAuth(`${API}/api/sentence?_t=${seed}`, {signal: AbortSignal.timeout(8000)});
+   512→                    if (r.ok) {
+   513→                        const data = await r.json();
+   514→                        if (data && data.text) {
+   515→                            S.sentence = data;
+   516→                            S.sentenceType = 'new';
+   517→                            loaded = true;
+   518→                        }
+   519→                    }
+   520→                } catch { /* retry */ }
+   521→                attempts++;
+   522→            } while (S.sentence && S.sentence.id === prevId && attempts < 5);
+   523→        }
+   524→
+   525→        if (!loaded || !S.sentence) {
+   526→            throw new Error('无法加载句子');
+   527→        }
+   528→
+   529→        S.mode = 'dictation';
+   530→        S.dictationResults = null;
+   531→        S._dictationErrorWords = null;
+   532→        S.fsrsRated = false;
+   533→
+   534→        renderSentence();
+   535→        renderDictationInputs();
+   536→        updateModeUI();
+   537→        fetchReviewCount();
+   538→    } catch (e) {
+   539→        console.error('loadSentence error:', e);
+   540→        el.sentenceEn.textContent = '加载失败，请点击刷新重试';
+   541→        el.diffBadge.textContent = '--';
+   542→        el.diffBadge.className = 'diff-badge';
+   543→    }
+   544→}
+   545→
+   546→function updateSentenceVisibility() {
+   547→    // In dictation mode, hide the sentence text and translation to prevent cheating
+   548→    // In practice mode (after dictation), show the full sentence
+   549→    if (S.mode === 'dictation') {
+   550→        el.sentenceEn.textContent = '🎧 听写模式 — 请根据听力输入句子';
+   551→        el.sentenceEn.classList.add('dictation-hidden');
+   552→        el.sentenceZh.textContent = '';
+   553→        el.sentenceZh.classList.add('dictation-hidden');
+   554→        // Also hide IPA and key phrases during dictation
+   555→        el.ipaSection.style.display = 'none';
+   556→        el.phrasesSection.style.display = 'none';
+   557→    } else {
+   558→        // Practice mode: show the full sentence
+   559→        if (S.sentence) {
+   560→            el.sentenceEn.textContent = S.sentence.text;
+   561→            el.sentenceZh.textContent = S.sentence.translation || '';
+   562→        }
+   563→        el.sentenceEn.classList.remove('dictation-hidden');
+   564→        el.sentenceZh.classList.remove('dictation-hidden');
+   565→        // Restore IPA visibility based on toggle
+   566→        el.ipaSection.style.display = S.ipaVisible ? '' : 'none';
+   567→    }
+   568→}
+   569→
+   570→function renderSentence() {
+   571→    const s = S.sentence;
+   572→    el.diffBadge.textContent = s.difficulty.toUpperCase();
+   573→    el.diffBadge.className = 'diff-badge ' + s.difficulty;
+   574→
+   575→    // Review badge
+   576→    if (S.sentenceType === 'review') {
+   577→        el.reviewBadge.style.display = '';
+   578→        el.reviewBadge.textContent = '复习';
+   579→        el.reviewBadge.className = 'review-badge review';
+   580→    } else {
+   581→        el.reviewBadge.style.display = '';
+   582→        el.reviewBadge.textContent = '新句';
+   583→        el.reviewBadge.className = 'review-badge new';
+   584→    }
+   585→
+   586→    // Apply sentence visibility based on current mode
+   587→    updateSentenceVisibility();
+   588→
+   589→    // IPA section - only render chips if visible (not in dictation mode)
+   590→    if (S.ipaVisible && S.mode !== 'dictation') renderIPAChips();
+   591→
+   592→    // Key phrases - hidden during dictation, shown in practice mode
+   593→    if (S.mode !== 'dictation' && s.key_phrases && s.key_phrases.length) {
+   594→        el.phrasesSection.style.display = '';
+   595→        el.phrasesList.innerHTML = s.key_phrases.map(p => `
+   596→            <div class="phrase-item">
+   597→                <div class="phrase-en">${p.phrase}</div>
+   598→                <div class="phrase-zh">${p.meaning}</div>
+   599→                ${p.note ? `<div class="phrase-note">${p.note}</div>` : ''}
+   600→            </div>
+   601→        `).join('');
+   602→    } else {
+   603→        el.phrasesSection.style.display = 'none';
+   604→    }
+   605→
+   606→    // Cultural note
+   607→    if (s.cultural_note) {
+   608→        el.culturalNote.style.display = '';
+   609→        el.culturalNote.innerHTML = `<strong>文化提示：</strong>${s.cultural_note}`;
+   610→    } else {
+   611→        el.culturalNote.style.display = 'none';
+   612→    }
+   613→
+   614→    // Words
+   615→    renderWords(s.word_details || []);
+   616→
+   617→    // Reset UI
+   618→    el.resultCard.style.display = 'none';
+   619→    el.loadingCard.style.display = 'none';
+   620→    el.playbackBar.style.display = 'none';
+   621→    S.recordedBlob = null;
+   622→    S.recordedUrl = null;
+   623→}
+   624→
+   625→// ============================================================
+   626→// IPA Display with clickable phoneme chips (compact format)
+   627→// ============================================================
+   628→function renderIPAChips() {
+   629→    const s = S.sentence;
+   630→    if (!s || !s.ipa) {
+   631→        el.ipaPhonemes.innerHTML = '<span style="color:var(--text3);font-size:13px;">No IPA available</span>';
+   632→        return;
+   633→    }
+   634→
+   635→    const ipaStr = s.ipa;
+   636→    const wordParts = ipaStr.split(/\s+/);
+   637→    let html = '/';
+   638→
+   639→    wordParts.forEach((word, wi) => {
+   640→        if (wi > 0) html += ' ';
+   641→        const symbols = tokenizeIPA(word);
+   642→        symbols.forEach(sym => {
+   643→            const cleanSym = sym.replace(/[ˈˌ]/g, '');
+   644→            const arpabet = findARPAbetForIPA(cleanSym);
+   645→            html += `<span class="ipa-chip" data-ipa="${escapeAttr(sym)}" data-arpabet="${arpabet}" onclick="pronouncePhoneme(this)">${sym}</span>`;
+   646→        });
+   647→    });
+   648→
+   649→    html += '/';
+   650→    el.ipaPhonemes.innerHTML = html;
+   651→}
+   652→
+   653→function tokenizeIPA(word) {
+   654→    const tokens = [];
+   655→    let i = 0;
+   656→    while (i < word.length) {
+   657→        const ch = word[i];
+   658→        if (ch === 'ˈ' || ch === 'ˌ') {
+   659→            if (i + 1 < word.length) {
+   660→                tokens.push(ch + word[i + 1]);
+   661→                i += 2;
+   662→            } else {
+   663→                tokens.push(ch);
+   664→                i++;
+   665→            }
+   666→        } else if (i + 1 < word.length) {
+   667→            const digraph = ch + word[i + 1];
+   668→            if (['tʃ','dʒ','aʊ','aɪ','eɪ','oʊ','ɔɪ'].includes(digraph)) {
+   669→                tokens.push(digraph);
+   670→                i += 2;
+   671→            } else {
+   672→                tokens.push(ch);
+   673→                i++;
+   674→            }
+   675→        } else {
+   676→            tokens.push(ch);
+   677→            i++;
+   678→        }
+   679→    }
+   680→    return tokens;
+   681→}
+   682→
+   683→function findARPAbetForIPA(ipaSym) {
+   684→    for (const [arp, ipa] of Object.entries(ARPABET_TO_IPA)) {
+   685→        if (ipa === ipaSym) return arp;
+   686→    }
+   687→    return '';
+   688→}
+   689→
+   690→function escapeAttr(s) {
+   691→    return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+   692→}
+   693→
+   694→// ============================================================
+   695→// Click-to-pronounce phonemes using standard IPA audio files
+   696→// ============================================================
+   697→const PHONEME_EXAMPLE_WORDS = {
+   698→    'AA': 'father', 'AE': 'cat', 'AH': 'about', 'AW': 'how', 'AY': 'my',
+   699→    'EH': 'bed', 'ER': 'bird', 'EY': 'day', 'IH': 'sit', 'IY': 'see',
+   700→    'OW': 'go', 'OY': 'boy', 'UH': 'book', 'UW': 'food',
+   701→    'B': 'big', 'CH': 'chair', 'D': 'day', 'DH': 'this', 'DX': 'water',
+   702→    'F': 'five', 'G': 'go', 'HH': 'hello', 'JH': 'jump', 'K': 'can',
+   703→    'L': 'light', 'M': 'man', 'N': 'no', 'NG': 'sing',
+   704→    'P': 'pen', 'R': 'red', 'S': 'see', 'SH': 'she', 'T': 'time',
+   705→    'TH': 'think', 'V': 'very', 'W': 'we', 'Y': 'yes', 'Z': 'zoo', 'ZH': 'vision',
+   706→};
+   707→
+   708→async function playIPAAudio(arpabet) {
+   709→    if (!arpabet) return false;
+   710→
+   711→    // Check if it's a diphthong/affricate - play components sequentially
+   712→    const components = DIPHTHONG_COMPONENTS[arpabet];
+   713→    if (components) {
+   714→        for (const comp of components) {
+   715→            await playSingleIPAAudio(comp);
+   716→        }
+   717→        return true;
+   718→    }
+   719→
+   720→    return await playSingleIPAAudio(arpabet);
+   721→}
+   722→
+   723→async function playSingleIPAAudio(arpabet) {
+   724→    if (!arpabet) return false;
+   725→
+   726→    // Try the standard IPA audio endpoint first (real human pronunciation)
+   727→    try {
+   728→        const r = await fetch(`${API}/api/ipa-audio/${encodeURIComponent(arpabet)}`);
+   729→        if (r.ok) {
+   730→            const contentType = r.headers.get('content-type') || '';
+   731→            // If it's a JSON response (composite), handle it
+   732→            if (contentType.includes('application/json')) {
+   733→                const data = await r.json();
+   734→                if (data.type === 'composite' && data.components) {
+   735→                    for (const compUrl of data.components) {
+   736→                        await playAudioFromUrl(`${API}${compUrl}`);
+   737→                    }
+   738→                    return true;
+   739→                }
+   740→            } else {
+   741→                // Direct audio file
+   742→                return await playAudioFromResponse(r);
+   743→            }
+   744→        }
+   745→    } catch { /* fallback */ }
+   746→
+   747→    return false;
+   748→}
+   749→
+   750→async function playAudioFromResponse(response) {
+   751→    try {
+   752→        const blob = await response.blob();
+   753→        if (blob.size > 200) {
+   754→            const url = URL.createObjectURL(blob);
+   755→            return await new Promise((resolve) => {
+   756→                const audio = new Audio(url);
+   757→                audio.onended = () => { URL.revokeObjectURL(url); resolve(true); };
+   758→                audio.onerror = () => { URL.revokeObjectURL(url); resolve(false); };
+   759→                audio.play().catch(() => resolve(false));
+   760→            });
+   761→        }
+   762→    } catch { /* ignore */ }
+   763→    return false;
+   764→}
+   765→
+   766→async function playAudioFromUrl(url) {
+   767→    try {
+   768→        const r = await fetch(url);
+   769→        if (r.ok) return await playAudioFromResponse(r);
+   770→    } catch { /* ignore */ }
+   771→    return false;
+   772→}
+   773→
+   774→function playPhonemeTTSFallback(arpabet) {
+   775→    // Fallback: speak the phoneme's example word using browser TTS
+   776→    if ('speechSynthesis' in window) {
+   777→        const exampleWord = PHONEME_EXAMPLE_WORDS[arpabet] || findExampleWordFromSentence('', arpabet);
+   778→        if (exampleWord) {
+   779→            const utter = new SpeechSynthesisUtterance(exampleWord);
+   780→            utter.lang = 'en-US';
+   781→            utter.rate = 0.6;
+   782→            const voices = speechSynthesis.getVoices();
+   783→            const usVoice = voices.find(v => v.lang === 'en-US') || voices.find(v => v.lang.startsWith('en'));
+   784→            if (usVoice) utter.voice = usVoice;
+   785→            speechSynthesis.cancel();
+   786→            speechSynthesis.speak(utter);
+   787→            return true;
+   788→        }
+   789→    }
+   790→    return false;
+   791→}
+   792→
+   793→async function pronouncePhoneme(chipEl) {
+   794→    const ipa = chipEl.dataset.ipa;
+   795→    const arpabet = chipEl.dataset.arpabet;
+   796→
+   797→    // Visual feedback
+   798→    chipEl.classList.add('playing');
+   799→    setTimeout(() => chipEl.classList.remove('playing'), 600);
+   800→
+   801→    // Try IPA standard audio first (real human pronunciation)
+   802→    const played = await playIPAAudio(arpabet);
+   803→    if (played) return;
+   804→
+   805→    // Fallback: TTS with example word
+   806→    playPhonemeTTSFallback(arpabet);
+   807→}
+   808→
+   809→function findExampleWordFromSentence(ipa, arpabet) {
+   810→    if (!S.sentence || !S.sentence.word_details) return null;
+   811→    for (const w of S.sentence.word_details) {
+   812→        if (w.arpabet && arpabet && w.arpabet.includes(arpabet)) {
+   813→            return w.word;
+   814→        }
+   815→    }
+   816→    return null;
+   817→}
+   818→
+   819→// Make pronouncePhoneme globally accessible
+   820→window.pronouncePhoneme = pronouncePhoneme;
+   821→
+   822→// ============================================================
+   823→// Words rendering (with IPA prominent)
+   824→// ============================================================
+   825→function renderWords(words) {
+   826→    if (!words || !words.length) { el.wordsList.innerHTML = ''; return; }
+   827→    el.wordsList.innerHTML = words.map(w => {
+   828→        const freq = w.frequency || 0;
+   829→        const freqDots = Array(5).fill(0).map((_, i) =>
+   830→            `<span class="freq-dot${i < freq ? ' active' : ''}"></span>`
+   831→        ).join('');
+   832→
+   833→        const ipaStr = w.ipa || '';
+   834→        const arpabetStr = w.arpabet ? w.arpabet.join(' ') : '';
+   835→
+   836→        return `
+   837→        <div class="word-item">
+   838→            <div class="word-main">
+   839→                <span class="word-word">${w.word}</span><span class="word-pos">${w.pos || ''}</span>
+   840→                ${ipaStr ? `<div class="word-ipa">/${ipaStr}/</div>` : ''}
+   841→                ${arpabetStr ? `<div class="word-phonetic">${arpabetStr}</div>` : ''}
+   842→                <div class="word-meaning">${w.meaning || ''}</div>
+   843→                ${w.memory_tip ? `<div class="word-extra">${w.memory_tip}</div>` : ''}
+   844→                ${w.grammar_note ? `<div class="word-extra">${w.grammar_note}</div>` : ''}
+   845→            </div>
+   846→            <div class="word-freq" title="使用频率">${freqDots}</div>
+   847→        </div>`;
+   848→    }).join('');
+   849→}
+   850→
+   851→// ============================================================
+   852→// TTS with fallback (Browser → Server) + Speed Control
+   853→// ============================================================
+   854→function speakTTS(speed) {
+   855→    if (!S.sentence) return;
+   856→    const useSpeed = speed || S.ttsSpeed;
+   857→    if (S.ttsMode === 'browser') {
+   858→        speakBrowserTTS(useSpeed);
+   859→    } else {
+   860→        speakServerTTS(useSpeed);
+   861→    }
+   862→}
+   863→
+   864→function speakBrowserTTS(speed) {
+   865→    if (!('speechSynthesis' in window)) {
+   866→        S.ttsFailCount++;
+   867→        checkTTSFallback();
+   868→        return;
+   869→    }
+   870→
+   871→    window.speechSynthesis.cancel();
+   872→
+   873→    const utter = new SpeechSynthesisUtterance(S.sentence.text);
+   874→    utter.lang = 'en-US';
+   875→    utter.rate = 0.9 * speed;  // Apply speed multiplier
+   876→    utter.pitch = 1.0;
+   877→
+   878→    const voices = speechSynthesis.getVoices();
+   879→    const usVoice = voices.find(v => v.lang === 'en-US') || voices.find(v => v.lang.startsWith('en'));
+   880→    if (usVoice) utter.voice = usVoice;
+   881→
+   882→    el.btnTTS.classList.add('active');
+   883→    utter.onend = () => el.btnTTS.classList.remove('active');
+   884→    utter.onerror = () => {
+   885→        el.btnTTS.classList.remove('active');
+   886→        S.ttsFailCount++;
+   887→        checkTTSFallback();
+   888→    };
+   889→
+   890→    speechSynthesis.speak(utter);
+   891→}
+   892→
+   893→async function speakServerTTS(speed) {
+   894→    if (!S.sentence) return;
+   895→    try {
+   896→        const r = await fetch(`${API}/api/tts?text=${encodeURIComponent(S.sentence.text)}`);
+   897→        if (!r.ok) throw new Error('Server TTS failed');
+   898→        const blob = await r.blob();
+   899→        const url = URL.createObjectURL(blob);
+   900→        el.ttsAudio.src = url;
+   901→        el.ttsAudio.playbackRate = speed || 1.0;
+   902→        el.ttsAudio.onended = () => {
+   903→            el.btnTTS.classList.remove('active');
+   904→            URL.revokeObjectURL(url);
+   905→        };
+   906→        el.ttsAudio.onerror = () => {
+   907→            el.btnTTS.classList.remove('active');
+   908→        };
+   909→        el.btnTTS.classList.add('active');
+   910→        await el.ttsAudio.play();
+   911→    } catch (e) {
+   912→        el.btnTTS.classList.remove('active');
+   913→        console.error('Server TTS error:', e);
+   914→    }
+   915→}
+   916→
+   917→function checkTTSFallback() {
+   918→    if (S.ttsFailCount >= 2 && S.ttsMode === 'browser') {
+   919→        S.ttsMode = 'server';
+   920→        console.log('Switching TTS mode to server after', S.ttsFailCount, 'failures');
+   921→        speakServerTTS();
+   922→    }
+   923→}
+   924→
+   925→// Ensure voices are loaded
+   926→if ('speechSynthesis' in window) {
+   927→    speechSynthesis.onvoiceschanged = () => speechSynthesis.getVoices();
+   928→}
+   929→
+   930→// ============================================================
+   931→// Dictation Mode
+   932→// ============================================================
+   933→function renderDictationInputs() {
+   934→    if (!S.sentence) return;
+   935→
+   936→    // Ensure we're in dictation mode
+   937→    S.mode = 'dictation';
+   938→
+   939→    const words = S.sentence.text.split(/\s+/);
+   940→
+   941→    // Make dictation inputs visible
+   942→    el.dictationInputs.style.display = '';
+   943→    el.dictationInputs.innerHTML = words.map((word, i) => {
+   944→        const cleanWord = word.replace(/[^a-zA-Z'-]/g, '');
+   945→        const hintLength = cleanWord.length;
+   946→        const hint = '_'.repeat(hintLength);
+   947→        const width = Math.max(50, Math.min(120, hintLength * 14));
+   948→
+   949→        return `
+   950→        <div class="dict-input-wrap">
+   951→            <input type="text" class="dict-input" data-index="${i}" data-answer="${escapeAttr(cleanWord)}"
+   952→                   style="width:${width}px;" maxlength="${hintLength + 5}"
+   953→                   placeholder="" autocomplete="off" spellcheck="false">
+   954→            <span class="dict-hint">${hint}</span>
+   955→            <span class="dict-correct-answer" id="dictAnswer${i}" style="display:none;"></span>
+   956→        </div>`;
+   957→    }).join('');
+   958→
+   959→    // Show dictation card, reset state
+   960→    el.dictationCard.style.display = '';
+   961→    el.dictationActions.style.display = '';
+   962→    el.dictationResults.style.display = 'none';
+   963→    el.dictationTransition.style.display = 'none';
+   964→    el.dictationPhase.textContent = '听写';
+   965→    el.dictationPhase.className = 'dictation-phase';
+   966→
+   967→    // Focus first input
+   968→    const firstInput = el.dictationInputs.querySelector('.dict-input');
+   969→    if (firstInput) setTimeout(() => firstInput.focus(), 300);
+   970→
+   971→    // Auto-advance on space
+   972→    el.dictationInputs.querySelectorAll('.dict-input').forEach(input => {
+   973→        input.addEventListener('keydown', e => {
+   974→            if (e.key === ' ') {
+   975→                e.preventDefault();
+   976→                const next = input.closest('.dict-input-wrap').nextElementSibling;
+   977→                if (next) next.querySelector('.dict-input').focus();
+   978→            } else if (e.key === 'Backspace' && input.value === '') {
+   979→                const prev = input.closest('.dict-input-wrap').previousElementSibling;
+   980→                if (prev) prev.querySelector('.dict-input').focus();
+   981→            } else if (e.key === 'Enter') {
+   982→                checkDictation();
+   983→            }
+   984→        });
+   985→    });
+   986→
+   987→    // Hide sentence during dictation
+   988→    updateSentenceVisibility();
+   989→
+   990→    // Auto-play TTS for dictation
+   991→    setTimeout(() => speakTTS(), 500);
+   992→}
+   993→
+   994→async function checkDictation() {
+   995→    if (!S.sentence) return;
+   996→
+   997→    const inputs = el.dictationInputs.querySelectorAll('.dict-input');
+   998→    const words = S.sentence.text.split(/\s+/);
+   999→    const userWords = Array.from(inputs).map(inp => inp.value.trim().toLowerCase());
+  1000→    const expectedWords = words.map(w => w.replace(/[^a-zA-Z'-]/g, '').toLowerCase());
+  1001→
+  1002→    // Try backend checking (uses Levenshtein distance)
+  1003→    let backendResults = null;
+  1004→    try {
+  1005→        const r = await fetchWithAuth(`${API}/api/dictation/check`, {
+  1006→            method: 'POST',
+  1007→            headers: { 'Content-Type': 'application/json' },
+  1008→            body: JSON.stringify({
+  1009→                sentence_text: S.sentence.text,
+  1010→                user_input: userWords,
+  1011→            }),
+  1012→        });
+  1013→        if (r.ok) backendResults = await r.json();
+  1014→    } catch { /* fallback to local check */ }
+  1015→
+  1016→    if (backendResults && backendResults.results) {
+  1017→        let correctCount = 0;
+  1018→        let partialCount = 0;
+  1019→        const alignmentResults = backendResults.results;
+  1020→        const inputMap = new Map();
+  1021→
+  1022→        let ei = 0, ui = 0;
+  1023→        for (const r of alignmentResults) {
+  1024→            if (r.type === 'match') {
+  1025→                inputMap.set(ui, { correct: true, type: 'match', expected: r.expected });
+  1026→                ei++; ui++;
+  1027→            } else if (r.type === 'near_correct') {
+  1028→                // 小拼写错误，算正确但标记为"需关注"
+  1029→                inputMap.set(ui, { correct: true, type: 'near_correct', expected: r.expected, actual: r.actual, similarity: r.similarity });
+  1030→                ei++; ui++;
+  1031→            } else if (r.type === 'partial') {
+  1032→                // 部分正确（有拼写框架但不够准确）
+  1033→                inputMap.set(ui, { correct: false, type: 'partial', expected: r.expected, actual: r.actual, similarity: r.similarity });
+  1034→                ei++; ui++;
+  1035→            } else if (r.type === 'substitution') {
+  1036→                inputMap.set(ui, { correct: false, type: 'substitution', expected: r.expected });
+  1037→                ei++; ui++;
+  1038→            } else if (r.type === 'deletion') {
+  1039→                ei++;
+  1040→            } else if (r.type === 'insertion') {
+  1041→                ui++;
+  1042→            }
+  1043→        }
+  1044→
+  1045→        inputs.forEach((input, i) => {
+  1046→            const mapped = inputMap.get(i);
+  1047→            input.classList.remove('correct', 'incorrect', 'partial', 'near-correct');
+  1048→            if (mapped) {
+  1049→                if (mapped.type === 'near_correct') {
+  1050→                    input.classList.add('correct', 'near-correct');
+  1051→                    correctCount++;
+  1052→                } else if (mapped.type === 'partial') {
+  1053→                    input.classList.add('incorrect', 'partial');
+  1054→                    partialCount++;
+  1055→                    const answerEl = document.getElementById(`dictAnswer${i}`);
+  1056→                    if (answerEl) {
+  1057→                        answerEl.textContent = mapped.expected;
+  1058→                        answerEl.style.display = '';
+  1059→                    }
+  1060→                } else if (mapped.correct) {
+  1061→                    input.classList.add('correct');
+  1062→                    correctCount++;
+  1063→                } else {
+  1064→                    input.classList.add('incorrect');
+  1065→                    const answerEl = document.getElementById(`dictAnswer${i}`);
+  1066→                    if (answerEl) {
+  1067→                        answerEl.textContent = mapped.expected;
+  1068→                        answerEl.style.display = '';
+  1069→                    }
+  1070→                }
+  1071→            } else {
+  1072→                input.classList.add('incorrect');
+  1073→            }
+  1074→            input.disabled = true;
+  1075→        });
+  1076→
+  1077→        const totalExpected = expectedWords.filter(w => w).length;
+  1078→        // near_correct 算正确，partial 算半对
+  1079→        const effectiveCorrect = correctCount + Math.round(partialCount * 0.5);
+  1080→        el.dictationResults.style.display = '';
+  1081→        el.dictationResults.innerHTML = `
+  1082→            <div class="dict-result-summary">
+  1083→                <span class="correct-count">${correctCount}</span>
+  1084→                <span class="total-count">/ ${totalExpected} 正确</span>
+  1085→                ${partialCount > 0 ? `<span class="partial-hint">（${partialCount}个近似）</span>` : ''}
+  1086→            </div>
+  1087→        `;
+  1088→        el.dictationActions.style.display = 'none';
+  1089→        el.dictationTransition.style.display = '';
+  1090→        S.dictationResults = { correct: correctCount, total: totalExpected, checked: true };
+  1091→        // 保存后端返回的错误词信息用于recordDictationErrors
+  1092→        S._dictationErrorWords = backendResults.error_words || [];
+  1093→    } else {
+  1094→        let correctCount = 0;
+  1095→        inputs.forEach((input, i) => {
+  1096→            const answer = expectedWords[i] || '';
+  1097→            const isCorrect = input.value.trim().toLowerCase() === answer;
+  1098→            input.classList.remove('correct', 'incorrect');
+  1099→            input.classList.add(isCorrect ? 'correct' : 'incorrect');
+  1100→            input.disabled = true;
+  1101→            if (isCorrect) {
+  1102→                correctCount++;
+  1103→            } else {
+  1104→                const answerEl = document.getElementById(`dictAnswer${i}`);
+  1105→                if (answerEl) {
+  1106→                    answerEl.textContent = answer;
+  1107→                    answerEl.style.display = '';
+  1108→                }
+  1109→            }
+  1110→        });
+  1111→
+  1112→        el.dictationResults.style.display = '';
+  1113→        el.dictationResults.innerHTML = `
+  1114→            <div class="dict-result-summary">
+  1115→                <span class="correct-count">${correctCount}</span>
+  1116→                <span class="total-count">/ ${expectedWords.length} 正确</span>
+  1117→            </div>
+  1118→        `;
+  1119→        el.dictationActions.style.display = 'none';
+  1120→        el.dictationTransition.style.display = '';
+  1121→        S.dictationResults = { correct: correctCount, total: expectedWords.length, checked: true };
+  1122→    }
+  1123→
+  1124→    // Auto-record dictation errors
+  1125→    recordDictationErrors(inputs, expectedWords);
+  1126→}
+  1127→
+  1128→function transitionToPractice() {
+  1129→    S.mode = 'practice';
+  1130→    updateModeUI();
+  1131→
+  1132→    // Show the full sentence now (was hidden during dictation)
+  1133→    updateSentenceVisibility();
+  1134→
+  1135→    // Restore key phrases if available
+  1136→    if (S.sentence && S.sentence.key_phrases && S.sentence.key_phrases.length) {
+  1137→        el.phrasesSection.style.display = '';
+  1138→    }
+  1139→
+  1140→    el.dictationPhase.textContent = '口语';
+  1141→    el.dictationPhase.className = 'dictation-phase practice';
+  1142→
+  1143→    // Hide dictation inputs area, keep the card visible with phase change
+  1144→    el.dictationInputs.style.display = 'none';
+  1145→    el.dictationResults.style.display = 'none';
+  1146→    el.dictationTransition.style.display = 'none';
+  1147→    el.dictationActions.style.display = 'none';
+  1148→
+  1149→    // Show recording card (it's now inside the practice section below the sentence)
+  1150→    el.recordingCard.style.display = '';
+  1151→
+  1152→    // Re-init canvas for waveform (since it may not have been visible)
+  1153→    setTimeout(() => {
+  1154→        initCanvas();
+  1155→        el.recordingCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  1156→    }, 200);
+  1157→}
+  1158→
+  1159→function updateModeUI() {
+  1160→    if (S.mode === 'dictation') {
+  1161→        el.dictationCard.style.display = '';
+  1162→        el.dictationInputs.style.display = '';
+  1163→        el.recordingCard.style.display = 'none';
+  1164→    } else {
+  1165→        el.recordingCard.style.display = '';
+  1166→    }
+  1167→}
+  1168→
+  1169→// ============================================================
+  1170→// FSRS Rating
+  1171→// ============================================================
+  1172→async function submitFSRSRating(rating) {
+  1173→    if (!S.sentence) return;
+  1174→
+  1175→    const cardId = S.sentence.fsrs?.card_id || `sentence_${S.sentence.id}`;
+  1176→
+  1177→    try {
+  1178→        const r = await fetchWithAuth(`${API}/api/fsrs/review`, {
+  1179→            method: 'POST',
+  1180→            headers: { 'Content-Type': 'application/json' },
+  1181→            body: JSON.stringify({
+  1182→                card_id: cardId,
+  1183→                rating: rating,
+  1184→            }),
+  1185→        });
+  1186→
+  1187→        if (r.ok) {
+  1188→            S.fsrsRated = true;
+  1189→            document.querySelectorAll('.fsrs-btn').forEach(btn => {
+  1190→                btn.classList.remove('selected');
+  1191→                if (parseInt(btn.dataset.rating) === rating) {
+  1192→                    btn.classList.add('selected');
+  1193→                }
+  1194→            });
+  1195→            setTimeout(() => loadSentence(), 800);
+  1196→        }
+  1197→    } catch (e) {
+  1198→        console.error('FSRS rating error:', e);
+  1199→        loadSentence();
+  1200→    }
+  1201→}
+  1202→
+  1203→// ============================================================
+  1204→// Events
+  1205→// ============================================================
+  1206→function bindEvents() {
+  1207→    el.btnRefresh.addEventListener('click', () => loadSentence(true));
+  1208→    el.btnTTS.addEventListener('click', () => speakTTS());
+  1209→
+  1210→    // IPA toggle
+  1211→    el.btnToggleIPA.addEventListener('click', () => {
+  1212→        S.ipaVisible = !S.ipaVisible;
+  1213→        el.ipaSection.style.display = S.ipaVisible ? '' : 'none';
+  1214→        el.btnToggleIPA.classList.toggle('active', S.ipaVisible);
+  1215→        if (S.ipaVisible) renderIPAChips();
+  1216→    });
+  1217→
+  1218→    el.btnToggleWords.addEventListener('click', () => {
+  1219→        S.wordsExpanded = !S.wordsExpanded;
+  1220→        el.wordsList.classList.toggle('collapsed', !S.wordsExpanded);
+  1221→        el.btnToggleWords.classList.toggle('collapsed', !S.wordsExpanded);
+  1222→    });
+  1223→
+  1224→    // Collapsible: Tips section
+  1225→    const btnToggleTips = document.getElementById('btnToggleTips');
+  1226→    if (btnToggleTips) {
+  1227→        btnToggleTips.addEventListener('click', () => {
+  1228→            const content = el.tipsList;
+  1229→            const isCollapsed = content.classList.contains('collapsed');
+  1230→            content.classList.toggle('collapsed', !isCollapsed);
+  1231→            btnToggleTips.classList.toggle('collapsed', !isCollapsed);
+  1232→        });
+  1233→    }
+  1234→
+  1235→    // Collapsible: Word scores section
+  1236→    const btnToggleWordScores = document.getElementById('btnToggleWordScores');
+  1237→    if (btnToggleWordScores) {
+  1238→        btnToggleWordScores.addEventListener('click', () => {
+  1239→            const content = el.wordScoreGrid;
+  1240→            const isCollapsed = content.classList.contains('collapsed');
+  1241→            content.classList.toggle('collapsed', !isCollapsed);
+  1242→            btnToggleWordScores.classList.toggle('collapsed', !isCollapsed);
+  1243→        });
+  1244→    }
+  1245→
+  1246→    // Dictation TTS with speed
+  1247→    el.btnTTSDictation.addEventListener('click', () => speakTTS());
+  1248→
+  1249→    // Speed buttons
+  1250→    document.querySelectorAll('.speed-btn').forEach(btn => {
+  1251→        btn.addEventListener('click', () => {
+  1252→            const speed = parseFloat(btn.dataset.speed);
+  1253→            S.ttsSpeed = speed;
+  1254→            // Update active state
+  1255→            document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+  1256→            btn.classList.add('active');
+  1257→            // Play with the new speed
+  1258→            speakTTS(speed);
+  1259→        });
+  1260→    });
+  1261→
+  1262→    el.btnDictationCheck.addEventListener('click', checkDictation);
+  1263→    el.btnStartPractice.addEventListener('click', transitionToPractice);
+  1264→
+  1265→    // Skip dictation button
+  1266→    const btnSkipDictation = document.getElementById('btnSkipDictation');
+  1267→    if (btnSkipDictation) {
+  1268→        btnSkipDictation.addEventListener('click', () => {
+  1269→            S.mode = 'practice';
+  1270→            updateModeUI();
+  1271→            // Show the full sentence now (was hidden during dictation)
+  1272→            updateSentenceVisibility();
+  1273→            // Restore key phrases if available
+  1274→            if (S.sentence && S.sentence.key_phrases && S.sentence.key_phrases.length) {
+  1275→                el.phrasesSection.style.display = '';
+  1276→            }
+  1277→            el.dictationPhase.textContent = '口语';
+  1278→            el.dictationPhase.className = 'dictation-phase practice';
+  1279→            el.dictationInputs.style.display = 'none';
+  1280→            el.dictationResults.style.display = 'none';
+  1281→            el.dictationTransition.style.display = 'none';
+  1282→            el.dictationActions.style.display = 'none';
+  1283→            el.recordingCard.style.display = '';
+  1284→            setTimeout(() => {
+  1285→                initCanvas();
+  1286→                el.recordingCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  1287→            }, 200);
+  1288→        });
+  1289→    }
+  1290→
+  1291→    // Recording
+  1292→    el.btnRecord.addEventListener('click', toggleRecording);
+  1293→    el.btnPlayback.addEventListener('click', togglePlayback);
+  1294→    el.btnSubmit.addEventListener('click', submitEvaluation);
+  1295→
+  1296→    el.btnRetry.addEventListener('click', () => {
+  1297→        el.resultCard.style.display = 'none';
+  1298→        el.playbackBar.style.display = 'none';
+  1299→    });
+  1300→
+  1301→    el.btnNext.addEventListener('click', () => loadSentence(true));
+  1302→
+  1303→    // FSRS rating buttons
+  1304→    document.querySelectorAll('.fsrs-btn').forEach(btn => {
+  1305→        btn.addEventListener('click', () => {
+  1306→            const rating = parseInt(btn.dataset.rating);
+  1307→            submitFSRSRating(rating);
+  1308→        });
+  1309→    });
+  1310→
+  1311→    // Modals
+  1312→    el.btnPhonemeGuide.addEventListener('click', openPhonemeGuide);
+  1313→    el.closePhonemeModal.addEventListener('click', () => el.phonemeModal.style.display = 'none');
+  1314→    el.btnStats.addEventListener('click', openStats);
+  1315→    el.closeStatsModal.addEventListener('click', () => el.statsModal.style.display = 'none');
+  1316→
+  1317→    el.phonemeModal.addEventListener('click', e => { if (e.target === el.phonemeModal) el.phonemeModal.style.display = 'none'; });
+  1318→    el.statsModal.addEventListener('click', e => { if (e.target === el.statsModal) el.statsModal.style.display = 'none'; });
+  1319→
+  1320→    // Mode selector events
+  1321→    if (el.btnModeSmart) el.btnModeSmart.addEventListener('click', () => switchLearningMode('smart'));
+  1322→    if (el.btnModeSequential) el.btnModeSequential.addEventListener('click', () => switchLearningMode('sequential'));
+  1323→    if (el.btnModeSettings) el.btnModeSettings.addEventListener('click', openIdRangeDialog);
+  1324→
+  1325→    // ID range dialog events
+  1326→    if (el.closeIdRangeModal) el.closeIdRangeModal.addEventListener('click', () => el.idRangeModal.style.display = 'none');
+  1327→    if (el.idRangeModal) el.idRangeModal.addEventListener('click', e => { if (e.target === el.idRangeModal) el.idRangeModal.style.display = 'none'; });
+  1328→    if (el.btnIdRangeConfirm) el.btnIdRangeConfirm.addEventListener('click', confirmIdRange);
+  1329→
+  1330→    // Data change banner
+  1331→    if (el.btnCloseDataChangeBanner) el.btnCloseDataChangeBanner.addEventListener('click', hideDataChangeBanner);
+  1332→
+  1333→    // Word review modal events
+  1334→    if (el.btnWordReview) el.btnWordReview.addEventListener('click', openWordReview);
+  1335→    if (el.closeWordReviewModal) el.closeWordReviewModal.addEventListener('click', () => el.wordReviewModal.style.display = 'none');
+  1336→    if (el.wordReviewModal) el.wordReviewModal.addEventListener('click', e => { if (e.target === el.wordReviewModal) el.wordReviewModal.style.display = 'none'; });
+  1337→
+  1338→    // Word practice modal events
+  1339→    initWordPractice();
+  1340→
+  1341→    // Settings modal
+  1342→    initSettings();
+  1343→
+  1344→    // Auth modal events
+  1345→    const authModal = document.getElementById('authModal');
+  1346→    const closeAuthModal = document.getElementById('closeAuthModal');
+  1347→    if (closeAuthModal) closeAuthModal.addEventListener('click', hideAuthModal);
+  1348→    if (authModal) authModal.addEventListener('click', e => { if (e.target === authModal) hideAuthModal(); });
+  1349→
+  1350→    const switchToRegister = document.getElementById('switchToRegister');
+  1351→    if (switchToRegister) switchToRegister.addEventListener('click', e => { e.preventDefault(); showAuthModal('register'); });
+  1352→    const switchToLogin = document.getElementById('switchToLogin');
+  1353→    if (switchToLogin) switchToLogin.addEventListener('click', e => { e.preventDefault(); showAuthModal('login'); });
+  1354→
+  1355→    const btnLogin = document.getElementById('btnLogin');
+  1356→    if (btnLogin) btnLogin.addEventListener('click', async () => {
+  1357→        const username = document.getElementById('loginUsername').value.trim();
+  1358→        const password = document.getElementById('loginPassword').value;
+  1359→        const errorEl = document.getElementById('loginError');
+  1360→        if (!username || !password) {
+  1361→            errorEl.textContent = '请输入用户名和密码';
+  1362→            errorEl.style.display = '';
+  1363→            return;
+  1364→        }
+  1365→        try {
+  1366→            btnLogin.disabled = true;
+  1367→            await doLogin(username, password);
+  1368→            hideAuthModal();
+  1369→            updateUserProfileUI();
+  1370→            loadWeaknessProfile();
+  1371→            loadSentence();
+  1372→        } catch (e) {
+  1373→            errorEl.textContent = e.message;
+  1374→            errorEl.style.display = '';
+  1375→        } finally {
+  1376→            btnLogin.disabled = false;
+  1377→        }
+  1378→    });
+  1379→
+  1380→    const btnRegister = document.getElementById('btnRegister');
+  1381→    if (btnRegister) btnRegister.addEventListener('click', async () => {
+  1382→        const username = document.getElementById('regUsername').value.trim();
+  1383→        const displayName = document.getElementById('regDisplayName').value.trim();
+  1384→        const password = document.getElementById('regPassword').value;
+  1385→        const passwordConfirm = document.getElementById('regPasswordConfirm').value;
+  1386→        const errorEl = document.getElementById('registerError');
+  1387→        if (!username || !password) {
+  1388→            errorEl.textContent = '请输入用户名和密码';
+  1389→            errorEl.style.display = '';
+  1390→            return;
+  1391→        }
+  1392→        if (password !== passwordConfirm) {
+  1393→            errorEl.textContent = '两次密码不一致';
+  1394→            errorEl.style.display = '';
+  1395→            return;
+  1396→        }
+  1397→        try {
+  1398→            btnRegister.disabled = true;
+  1399→            await doRegister(username, password, displayName);
+  1400→            hideAuthModal();
+  1401→            updateUserProfileUI();
+  1402→            loadSentence();
+  1403→        } catch (e) {
+  1404→            errorEl.textContent = e.message;
+  1405→            errorEl.style.display = '';
+  1406→        } finally {
+  1407→            btnRegister.disabled = false;
+  1408→        }
+  1409→    });
+  1410→
+  1411→    const btnGuestLogin = document.getElementById('btnGuestLogin');
+  1412→    if (btnGuestLogin) btnGuestLogin.addEventListener('click', () => {
+  1413→        doGuestLogin();
+  1414→        hideAuthModal();
+  1415→        updateUserProfileUI();
+  1416→        loadSentence();
+  1417→    });
+  1418→
+  1419→    // btnNewUser removed - no user list/switcher anymore
+  1420→
+  1421→    // User profile click -> show login dialog (not switcher)
+  1422→    const userProfile = document.getElementById('userProfile');
+  1423→    if (userProfile) userProfile.addEventListener('click', () => {
+  1424→        if (S.user && S.user.id !== 'default') {
+  1425→            // 已登录 -> 登出
+  1426→            if (confirm('确定要退出登录吗？')) doLogout().then(() => updateUserProfileUI());
+  1427→        } else {
+  1428→            // 未登录 -> 弹出登录框
+  1429→            showAuthModal('login');
+  1430→        }
+  1431→    });
+  1432→
+  1433→    // Playback time update
+  1434→    el.playbackAudio.addEventListener('timeupdate', () => {
+  1435→        if (el.playbackAudio.duration) {
+  1436→            const pct = (el.playbackAudio.currentTime / el.playbackAudio.duration) * 100;
+  1437→            el.playbackFill.style.width = pct + '%';
+  1438→            const m = Math.floor(el.playbackAudio.currentTime / 60);
+  1439→            const s = Math.floor(el.playbackAudio.currentTime % 60);
+  1440→            el.playbackTime.textContent = `${m}:${String(s).padStart(2,'0')}`;
+  1441→        }
+  1442→    });
+  1443→    el.playbackAudio.addEventListener('ended', () => {
+  1444→        S.playbackPlaying = false;
+  1445→        el.btnPlayback.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+  1446→        el.playbackFill.style.width = '0%';
+  1447→    });
+  1448→}
+  1449→
+  1450→// ============================================================
+  1451→// Recording
+  1452→// ============================================================
+  1453→async function toggleRecording() {
+  1454→    if (S.recording) stopRecording();
+  1455→    else await startRecording();
+  1456→}
+  1457→
+  1458→async function startRecording() {
+  1459→    try {
+  1460→        const stream = await navigator.mediaDevices.getUserMedia({
+  1461→            audio: { channelCount:1, sampleRate:16000, echoCancellation:true, noiseSuppression:true }
+  1462→        });
+  1463→        S.stream = stream;
+  1464→        S.chunks = [];
+  1465→        S.recording = true;
+  1466→
+  1467→        S.audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  1468→        const src = S.audioCtx.createMediaStreamSource(stream);
+  1469→        S.analyser = S.audioCtx.createAnalyser();
+  1470→        S.analyser.fftSize = 2048;
+  1471→        src.connect(S.analyser);
+  1472→
+  1473→        const processor = S.audioCtx.createScriptProcessor(4096, 1, 1);
+  1474→        S.pcmChunks = [];
+  1475→        processor.onaudioprocess = e => {
+  1476→            if (S.recording) {
+  1477→                S.pcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  1478→            }
+  1479→        };
+  1480→        src.connect(processor);
+  1481→        processor.connect(S.audioCtx.destination);
+  1482→        S.processor = processor;
+  1483→
+  1484→        S.mediaRec = new MediaRecorder(stream, { mimeType: getMime() });
+  1485→        S.mediaRec.ondataavailable = e => { if (e.data.size > 0) S.chunks.push(e.data); };
+  1486→        S.mediaRec.onstop = onRecordStop;
+  1487→        S.mediaRec.start(100);
+  1488→
+  1489→        // UI updates
+  1490→        el.recDot.classList.add('stop');
+  1491→        el.recLabel.textContent = '停止录音';
+  1492→        el.recInfo.style.display = 'flex';
+  1493→        el.waveformPlaceholder.classList.add('hidden');
+  1494→        el.playbackBar.style.display = 'none';
+  1495→        el.resultCard.style.display = 'none';
+  1496→        document.querySelector('.rec-ring').classList.add('active');
+  1497→
+  1498→        // Start timer - record the start time
+  1499→        S.recStart = Date.now();
+  1500→        el.recTime.textContent = '0:00';
+  1501→        if (S.recTimer) clearInterval(S.recTimer);
+  1502→        S.recTimer = setInterval(updateRecTime, 200);
+  1503→        // Force first update
+  1504→        updateRecTime();
+  1505→
+  1506→        // Start waveform visualization (re-init canvas first)
+  1507→        requestAnimationFrame(() => {
+  1508→            initCanvas();
+  1509→            startWaveform();
+  1510→        });
+  1511→    } catch (e) {
+  1512→        alert('无法访问麦克风，请确保已授予权限。');
+  1513→    }
+  1514→}
+  1515→
+  1516→function stopRecording() {
+  1517→    S.recording = false;
+  1518→    if (S.mediaRec && S.mediaRec.state !== 'inactive') S.mediaRec.stop();
+  1519→    if (S.processor) { S.processor.disconnect(); S.processor = null; }
+  1520→    if (S.stream) S.stream.getTracks().forEach(t => t.stop());
+  1521→    if (S.audioCtx) { S.audioCtx.close(); S.audioCtx = null; }
+  1522→
+  1523→    el.recDot.classList.remove('stop');
+  1524→    el.recLabel.textContent = '开始录音';
+  1525→    el.recInfo.style.display = 'none';
+  1526→    document.querySelector('.rec-ring').classList.remove('active');
+  1527→    clearInterval(S.recTimer);
+  1528→    S.recTimer = null;
+  1529→    stopWaveform();
+  1530→}
+  1531→
+  1532→function onRecordStop() {
+  1533→    if (S.pcmChunks && S.pcmChunks.length > 0) {
+  1534→        const sampleRate = 16000; // Use 16000 since audioCtx may be closed
+  1535→        const wavBlob = encodeWAV(S.pcmChunks, sampleRate);
+  1536→        if (wavBlob.size > 1000) {
+  1537→            S.recordedBlob = wavBlob;
+  1538→            S.recordedUrl = URL.createObjectURL(wavBlob);
+  1539→            el.playbackBar.style.display = 'flex';
+  1540→            el.playbackAudio.src = S.recordedUrl;
+  1541→            el.playbackFill.style.width = '0%';
+  1542→            el.playbackTime.textContent = '0:00';
+  1543→            return;
+  1544→        }
+  1545→    }
+  1546→
+  1547→    const mime = S.mediaRec?.mimeType || 'audio/webm';
+  1548→    S.recordedBlob = new Blob(S.chunks, { type: mime });
+  1549→    S.recordedUrl = URL.createObjectURL(S.recordedBlob);
+  1550→
+  1551→    if (S.recordedBlob.size < 1000) { alert('录音太短，请重试'); return; }
+  1552→
+  1553→    el.playbackBar.style.display = 'flex';
+  1554→    el.playbackAudio.src = S.recordedUrl;
+  1555→    el.playbackFill.style.width = '0%';
+  1556→    el.playbackTime.textContent = '0:00';
+  1557→}
+  1558→
+  1559→function encodeWAV(chunks, sampleRate) {
+  1560→    const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+  1561→    const buffer = new ArrayBuffer(44 + totalLen * 2);
+  1562→    const view = new DataView(buffer);
+  1563→
+  1564→    const writeStr = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+  1565→    writeStr(0, 'RIFF');
+  1566→    view.setUint32(4, 36 + totalLen * 2, true);
+  1567→    writeStr(8, 'WAVE');
+  1568→    writeStr(12, 'fmt ');
+  1569→    view.setUint32(16, 16, true);
+  1570→    view.setUint16(20, 1, true);
+  1571→    view.setUint16(22, 1, true);
+  1572→    view.setUint32(24, sampleRate, true);
+  1573→    view.setUint32(28, sampleRate * 2, true);
+  1574→    view.setUint16(32, 2, true);
+  1575→    view.setUint16(34, 16, true);
+  1576→    writeStr(36, 'data');
+  1577→    view.setUint32(40, totalLen * 2, true);
+  1578→
+  1579→    let offset = 44;
+  1580→    for (const chunk of chunks) {
+  1581→        for (let i = 0; i < chunk.length; i++) {
+  1582→            let s = Math.max(-1, Math.min(1, chunk[i]));
+  1583→            s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  1584→            view.setInt16(offset, s, true);
+  1585→            offset += 2;
+  1586→        }
+  1587→    }
+  1588→
+  1589→    return new Blob([buffer], { type: 'audio/wav' });
+  1590→}
+  1591→
+  1592→function updateRecTime() {
+  1593→    if (!S.recStart) return;
+  1594→    const sec = Math.floor((Date.now() - S.recStart) / 1000);
+  1595→    const m = Math.floor(sec / 60);
+  1596→    const s = sec % 60;
+  1597→    el.recTime.textContent = `${m}:${String(s).padStart(2,'0')}`;
+  1598→}
+  1599→
+  1600→function getMime() {
+  1601→    const types = ['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
+  1602→    for (const t of types) { if (MediaRecorder.isTypeSupported(t)) return t; }
+  1603→    return '';
+  1604→}
+  1605→
+  1606→function togglePlayback() {
+  1607→    if (!S.recordedUrl) return;
+  1608→    if (S.playbackPlaying) {
+  1609→        el.playbackAudio.pause();
+  1610→        S.playbackPlaying = false;
+  1611→        el.btnPlayback.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+  1612→    } else {
+  1613→        el.playbackAudio.play();
+  1614→        S.playbackPlaying = true;
+  1615→        el.btnPlayback.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+  1616→    }
+  1617→}
+  1618→
+  1619→// ============================================================
+  1620→// Waveform Visualization
+  1621→// ============================================================
+  1622→function initCanvas() {
+  1623→    const c = el.waveformCanvas;
+  1624→    if (!c) return;
+  1625→    const dpr = window.devicePixelRatio || 1;
+  1626→    const r = c.getBoundingClientRect();
+  1627→    if (r.width === 0 || r.height === 0) {
+  1628→        // Canvas not visible yet - retry after layout
+  1629→        setTimeout(() => {
+  1630→            const r2 = c.getBoundingClientRect();
+  1631→            if (r2.width > 0 && r2.height > 0) {
+  1632→                c.width = r2.width * dpr;
+  1633→                c.height = r2.height * dpr;
+  1634→                const ctx = c.getContext('2d');
+  1635→                ctx.scale(dpr, dpr);
+  1636→                drawIdle(ctx, r2.width, r2.height);
+  1637→            }
+  1638→        }, 100);
+  1639→        return;
+  1640→    }
+  1641→    c.width = r.width * dpr;
+  1642→    c.height = r.height * dpr;
+  1643→    const ctx = c.getContext('2d');
+  1644→    ctx.scale(dpr, dpr);
+  1645→    drawIdle(ctx, r.width, r.height);
+  1646→}
+  1647→
+  1648→function drawIdle(ctx, w, h) {
+  1649→    ctx.clearRect(0, 0, w, h);
+  1650→    const cy = h / 2;
+  1651→    ctx.beginPath();
+  1652→    ctx.strokeStyle = '#c7d2fe';
+  1653→    ctx.lineWidth = 1.5;
+  1654→    for (let x = 0; x < w; x++) {
+  1655→        const y = cy + Math.sin(x * 0.04) * 2;
+  1656→        x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  1657→    }
+  1658→    ctx.stroke();
+  1659→}
+  1660→
+  1661→function startWaveform() {
+  1662→    const c = el.waveformCanvas;
+  1663→    if (!c || !S.analyser) return;
+  1664→    const dpr = window.devicePixelRatio || 1;
+  1665→    const r = c.getBoundingClientRect();
+  1666→    const w = r.width, h = r.height;
+  1667→    if (w === 0 || h === 0) return;
+  1668→    const ctx = c.getContext('2d');
+  1669→    const bufLen = S.analyser.frequencyBinCount;
+  1670→    const tData = new Uint8Array(bufLen);
+  1671→    const fData = new Uint8Array(bufLen);
+  1672→
+  1673→    function draw() {
+  1674→        if (!S.recording || !S.analyser) return;
+  1675→        S.analyser.getByteTimeDomainData(tData);
+  1676→        S.analyser.getByteFrequencyData(fData);
+  1677→        ctx.clearRect(0, 0, w, h);
+  1678→
+  1679→        const bg = ctx.createLinearGradient(0, 0, 0, h);
+  1680→        bg.addColorStop(0, 'rgba(79,70,229,0.02)');
+  1681→        bg.addColorStop(1, 'rgba(79,70,229,0.06)');
+  1682→        ctx.fillStyle = bg;
+  1683→        ctx.fillRect(0, 0, w, h);
+  1684→
+  1685→        // Waveform line
+  1686→        ctx.lineWidth = 2;
+  1687→        ctx.strokeStyle = '#4f46e5';
+  1688→        ctx.beginPath();
+  1689→        const sw = w / bufLen;
+  1690→        let x = 0;
+  1691→        for (let i = 0; i < bufLen; i++) {
+  1692→            const y = (tData[i] / 128.0) * (h / 2);
+  1693→            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  1694→            x += sw;
+  1695→        }
+  1696→        ctx.lineTo(w, h / 2);
+  1697→        ctx.stroke();
+  1698→
+  1699→        // Frequency bars
+  1700→        const bc = 32, bw = w / bc - 2, step = Math.floor(bufLen / bc);
+  1701→        for (let i = 0; i < bc; i++) {
+  1702→            const v = fData[i * step] / 255;
+  1703→            const bh = v * h * 0.25;
+  1704→            const a = 0.25 + v * 0.5;
+  1705→            ctx.fillStyle = `rgba(79,70,229,${a})`;
+  1706→            ctx.fillRect(i * (bw + 2), h - bh, bw, bh);
+  1707→        }
+  1708→
+  1709→        S.animFrame = requestAnimationFrame(draw);
+  1710→    }
+  1711→    draw();
+  1712→}
+  1713→
+  1714→function stopWaveform() {
+  1715→    if (S.animFrame) { cancelAnimationFrame(S.animFrame); S.animFrame = null; }
+  1716→    const c = el.waveformCanvas;
+  1717→    if (!c) return;
+  1718→    const dpr = window.devicePixelRatio || 1;
+  1719→    const r = c.getBoundingClientRect();
+  1720→    if (r.width === 0 || r.height === 0) return;
+  1721→    const ctx = c.getContext('2d');
+  1722→    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  1723→    ctx.scale(dpr, dpr);
+  1724→    drawIdle(ctx, r.width, r.height);
+  1725→}
+  1726→
+  1727→// ============================================================
+  1728→// Submit Evaluation
+  1729→// ============================================================
+  1730→async function submitEvaluation() {
+  1731→    if (!S.recordedBlob || !S.sentence) return;
+  1732→
+  1733→    el.loadingCard.style.display = 'flex';
+  1734→    el.resultCard.style.display = 'none';
+  1735→
+  1736→    try {
+  1737→        const fd = new FormData();
+  1738→        const ext = S.recordedBlob.type.includes('wav') ? 'wav'
+  1739→            : S.recordedBlob.type.includes('webm') ? 'webm'
+  1740→            : S.recordedBlob.type.includes('ogg') ? 'ogg' : 'wav';
+  1741→        fd.append('audio', S.recordedBlob, `rec.${ext}`);
+  1742→        fd.append('sentence_text', S.sentence.text);
+  1743→
+  1744→        const res = await fetchWithAuth(`${API}/api/evaluate`, { method: 'POST', body: fd });
+  1745→        if (!res.ok) throw new Error(`评测失败 (${res.status})`);
+  1746→        const data = await res.json();
+  1747→
+  1748→        renderResults(data);
+  1749→        updateStats(data);
+  1750→    } catch (e) {
+  1751→        alert('评测失败: ' + e.message);
+  1752→    } finally {
+  1753→        el.loadingCard.style.display = 'none';
+  1754→    }
+  1755→}
+  1756→
+  1757→// ============================================================
+  1758→// Results
+  1759→// ============================================================
+  1760→function renderResults(d) {
+  1761→    el.resultCard.style.display = '';
+  1762→
+  1763→    S.fsrsRated = false;
+  1764→    document.querySelectorAll('.fsrs-btn').forEach(btn => btn.classList.remove('selected'));
+  1765→
+  1766→    animNum(el.overallScore, d.scores.overall, 1200);
+  1767→    animRing(d.scores.overall);
+  1768→    animSub(el.pronVal, el.pronFill, d.scores.pronunciation);
+  1769→    animSub(el.compVal, el.compFill, d.scores.completeness);
+  1770→    animSub(el.fluVal, el.fluFill, d.scores.fluency);
+  1771→
+  1772→    renderWordScores(d.words || []);
+  1773→    renderPhonemes(d);
+  1774→    renderFluency(d.fluency_details || {});
+  1775→    renderTips(d.tips || []);
+  1776→
+  1777→    setTimeout(() => el.resultCard.scrollIntoView({ behavior:'smooth', block:'start' }), 300);
+  1778→}
+  1779→
+  1780→function animNum(el, target, dur) {
+  1781→    const t0 = performance.now();
+  1782→    (function step(ts) {
+  1783→        const p = Math.min((ts - t0) / dur, 1);
+  1784→        el.textContent = Math.round((1 - Math.pow(1 - p, 3)) * target);
+  1785→        if (p < 1) requestAnimationFrame(step);
+  1786→    })(t0);
+  1787→}
+  1788→
+  1789→function animRing(score) {
+  1790→    const circ = 326.73;
+  1791→    const off = circ * (1 - score / 100);
+  1792→    el.scoreRing.style.transition = 'stroke-dashoffset 1.2s cubic-bezier(.4,0,.2,1), stroke .5s';
+  1793→    el.scoreRing.style.strokeDashoffset = off;
+  1794→    el.scoreRing.style.stroke = score >= 80 ? '#22c55e' : score >= 60 ? '#4f46e5' : score >= 40 ? '#f59e0b' : '#ef4444';
+  1795→}
+  1796→
+  1797→function animSub(valEl, fillEl, v) {
+  1798→    animNum(valEl, v, 900);
+  1799→    setTimeout(() => fillEl.style.width = v + '%', 80);
+  1800→}
+  1801→
+  1802→function renderWordScores(words) {
+  1803→    el.wordScoreGrid.innerHTML = words.map(w => {
+  1804→        const c = w.accuracy >= 80 ? 'hi' : w.accuracy >= 50 ? 'md' : 'lo';
+  1805→        return `<div class="ws-item${w.has_error ? ' err' : ''}"><div class="ws-word">${w.word}</div><div class="ws-acc ${c}">${w.accuracy}%</div></div>`;
+  1806→    }).join('');
+  1807→}
+  1808→
+  1809→function renderPhonemes(d) {
+  1810→    const exp = d.phonemes.expected;
+  1811→    const act = d.phonemes.actual;
+  1812→    const errs = d.errors || [];
+  1813→
+  1814→    const errPos = new Map();
+  1815→    errs.forEach(e => {
+  1816→        if (e.type === 'substitution') errPos.set(e.position, e);
+  1817→        else if (e.type === 'deletion') errPos.set(e.position, e);
+  1818→    });
+  1819→
+  1820→    el.phExpected.innerHTML = exp.map((p, i) => {
+  1821→        const cls = errPos.has(i) ? 'bad' : 'ok';
+  1822→        const ipa = ARPABET_TO_IPA[p] || '';
+  1823→        const ipaLabel = ipa ? `/${ipa}/` : '';
+  1824→        return `<span class="ph-chip ${cls} clickable" title="${ipaLabel} - 点击听发音" data-arpabet="${p}" onclick="pronounceResultPhoneme(this)">${ipa ? ipa : p}<span style="font-size:9px;opacity:0.6;margin-left:2px;">${p}</span></span>`;
+  1825→    }).join('');
+  1826→
+  1827→    el.phActual.innerHTML = act.map(p => {
+  1828→        const cls = exp.includes(p) ? 'ok' : 'extra';
+  1829→        const ipa = ARPABET_TO_IPA[p] || '';
+  1830→        const ipaLabel = ipa ? `/${ipa}/` : '';
+  1831→        return `<span class="ph-chip ${cls} clickable" title="${ipaLabel} - 点击听发音" data-arpabet="${p}" onclick="pronounceResultPhoneme(this)">${ipa ? ipa : p}<span style="font-size:9px;opacity:0.6;margin-left:2px;">${p}</span></span>`;
+  1832→    }).join('');
+  1833→}
+  1834→
+  1835→async function pronounceResultPhoneme(chipEl) {
+  1836→    const arpabet = chipEl.dataset.arpabet;
+  1837→    if (!arpabet) return;
+  1838→
+  1839→    chipEl.classList.add('playing');
+  1840→    setTimeout(() => chipEl.classList.remove('playing'), 600);
+  1841→
+  1842→    // Try IPA standard audio first (real human pronunciation)
+  1843→    const played = await playIPAAudio(arpabet);
+  1844→    if (played) return;
+  1845→
+  1846→    // Fallback: TTS with example word
+  1847→    playPhonemeTTSFallback(arpabet);
+  1848→}
+  1849→
+  1850→window.pronounceResultPhoneme = pronounceResultPhoneme;
+  1851→
+  1852→function renderFluency(fd) {
+  1853→    el.fluDuration.textContent = (fd.total_duration || 0) + 's';
+  1854→    el.fluRate.textContent = (fd.speaking_rate || 0) + ' /s';
+  1855→    el.fluPauses.textContent = fd.pause_count || 0;
+  1856→    el.fluPauseDur.textContent = (fd.pause_duration || 0) + 's';
+  1857→}
+  1858→
+  1859→function renderTips(tips) {
+  1860→    if (!tips.length) {
+  1861→        el.tipsList.innerHTML = '<div class="tip-card low"><div class="tip-desc">发音很好！没有发现明显问题。</div></div>';
+  1862→        return;
+  1863→    }
+  1864→
+  1865→    el.tipsList.innerHTML = tips.map(t => {
+  1866→        let body = '';
+  1867→        if (t.type === 'insertion') {
+  1868→            body = `<p>${t.tip}</p>`;
+  1869→        } else {
+  1870→            body = `
+  1871→                ${t.common_error ? `<p><strong>常见错误：</strong>${t.common_error}</p>` : ''}
+  1872→                ${t.solution ? `<p><strong>纠正方法：</strong>${t.solution}</p>` : ''}
+  1873→                ${t.mouth_shape ? `<p><strong>口型要点：</strong>${t.mouth_shape}</p>` : ''}
+  1874→            `;
+  1875→        }
+  1876→
+  1877→        let practiceWords = '';
+  1878→        if (t.practice_words && t.practice_words.length) {
+  1879→            practiceWords = `<div class="tip-practice">${t.practice_words.map(w => `<span class="tip-pw">${w}</span>`).join('')}</div>`;
+  1880→        }
+  1881→
+  1882→        let minimalPair = '';
+  1883→        if (t.minimal_pair) {
+  1884→            const mp = t.minimal_pair;
+  1885→            minimalPair = `
+  1886→                <div class="tip-mp">
+  1887→                    <strong>最小对立对训练 /${mp.pair[0]}/ vs /${mp.pair[1]}/</strong><br>
+  1888→                    ${mp.native_issue ? `<em>母语干扰：${mp.native_issue}</em><br>` : ''}
+  1889→                    绕口令练习：<strong>"${mp.drill_sentence}"</strong>
+  1890→                </div>
+  1891→            `;
+  1892→        }
+  1893→
+  1894→        const badge = t.type === 'substitution' ? '错读' : t.type === 'deletion' ? '漏读' : '多读';
+  1895→
+  1896→        return `
+  1897→        <div class="tip-card ${t.severity}">
+  1898→            <div class="tip-header">
+  1899→                <span class="tip-badge">${badge}</span>
+  1900→                <span class="tip-desc">${t.description}</span>
+  1901→            </div>
+  1902→            <div class="tip-body">${body}</div>
+  1903→            ${practiceWords}
+  1904→            ${minimalPair}
+  1905→        </div>`;
+  1906→    }).join('');
+  1907→}
+  1908→
+  1909→// ============================================================
+  1910→// Stats (Spaced Repetition + Error Pattern)
+  1911→// ============================================================
+  1912→function updateStats(data) {
+  1913→    // 统计数据全部记录到服务端数据库（跨浏览器同步）
+  1914→    // 不再使用 localStorage
+  1915→    if (S.sentence) {
+  1916→        try {
+  1917→            const wordScores = (data.words || []).map(w => ({ word: w.word, accuracy: w.accuracy }));
+  1918→            const errors = (data.errors || []).map(e => ({
+  1919→                expected: e.expected || '',
+  1920→                actual: e.actual || '',
+  1921→                type: e.type || 'substitution',
+  1922→            }));
+  1923→
+  1924→            // Collect pronunciation error words (accuracy < 60)
+  1925→            const pronunciationErrorWords = (data.words || [])
+  1926→                .filter(w => w.accuracy < 60)
+  1927→                .map(w => w.word);
+  1928→
+  1929→            const evalBody = {
+  1930→                sentence_id: `sentence_${S.sentence.id}`,
+  1931→                overall_score: data.scores?.overall || 0,
+  1932→                pronunciation_score: data.scores?.pronunciation || 0,
+  1933→                completeness_score: data.scores?.completeness || 0,
+  1934→                fluency_score: data.scores?.fluency || 0,
+  1935→                errors: errors,
+  1936→                word_scores: wordScores,
+  1937→                duration: data.fluency_details?.total_duration || 0,
+  1938→            };
+  1939→
+  1940→            // Add pronunciation error words if any
+  1941→            if (pronunciationErrorWords.length > 0) {
+  1942→                evalBody.pronunciation_error_words = pronunciationErrorWords;
+  1943→            }
+  1944→
+  1945→            fetchWithAuth(`${API}/api/learning/record-evaluation`, {
+  1946→                method: 'POST',
+  1947→                headers: { 'Content-Type': 'application/json' },
+  1948→                body: JSON.stringify(evalBody),
+  1949→            }).catch(() => {});
+  1950→        } catch {}
+  1951→    }
+  1952→}
+  1953→
+  1954→function openStats() {
+  1955→    // 先显示加载状态
+  1956→    el.statsModalBody.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载统计数据...</div>';
+  1957→    el.statsModal.style.display = 'flex';
+  1958→
+  1959→    // 从服务端加载完整统计数据
+  1960→    loadServerStats().then(stats => {
+  1961→        if (!stats) {
+  1962→            el.statsModalBody.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);">暂无统计数据，开始练习后即可查看</div>';
+  1963→            return;
+  1964→        }
+  1965→        renderStatsContent(stats);
+  1966→    });
+  1967→}
+  1968→
+  1969→function renderStatsContent(stats) {
+  1970→    const scores = stats.recent_scores || [];
+  1971→    const errors = stats.error_phonemes || {};
+  1972→    const wordsLearned = stats.words_learned || {};
+  1973→    const analytics = stats.analytics || {};
+  1974→    const fsrsStats = stats.fsrs_stats || {};
+  1975→    const weakness = stats.weakness || stats.analytics?.weakness || S.weaknessProfile;
+  1976→
+  1977→    const totalPractice = stats.total_practice || 0;
+  1978→    const avg = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) : 0;
+  1979→    const best = scores.length ? Math.max(...scores) : 0;
+  1980→    const wordsCount = Object.keys(wordsLearned).length;
+  1981→    const totalErrorCount = Object.values(errors).reduce((a, b) => a + b, 0);
+  1982→    const errorPhonemeCount = Object.keys(errors).length;
+  1983→
+  1984→    // Greeting section
+  1985→    const userName = S.user && S.user.id !== 'default' ? (S.user.display_name || S.user.username) : '学习者';
+  1986→    const streakBadge = analytics.streak ?
+  1987→        `<span class="streak-badge">🔥 ${analytics.streak}天连续学习</span>` : '';
+  1988→    const improvementRate = analytics.improvement_rate;
+  1989→    const improvementBadge = improvementRate !== undefined && improvementRate !== 0 ?
+  1990→        `<span class="improvement-rate ${improvementRate > 0 ? 'positive' : improvementRate < 0 ? 'negative' : 'neutral'}">${improvementRate > 0 ? '↑' : improvementRate < 0 ? '↓' : '→'} ${Math.abs(improvementRate).toFixed(1)}分 ${improvementRate > 0 ? '进步' : '需加油'}</span>` : '';
+  1991→
+  1992→    // Weakness heatmap
+  1993→    let weaknessHTML = '';
+  1994→    if (weakness && weakness.phoneme_weaknesses && weakness.phoneme_weaknesses.length > 0) {
+  1995→        weaknessHTML = `
+  1996→        <div class="stats-section">
+  1997→            <div class="stats-section-header" onclick="toggleStatsCollapse('statsWeaknessCollapse')">
+  1998→                <h4 class="stats-section-title">
+  1999→                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+  2000→                    薄弱音素分析
+
+[showing lines 1-2000 of 3779; use offset=2001 with limit to continue reading]
