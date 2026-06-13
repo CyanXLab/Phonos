@@ -1,0 +1,833 @@
+     1→"""
+     2→FSRS 间隔重复算法 + SQLite 持久化（支持多用户）
+     3→
+     4→基于 FSRS-4.5 算法实现，用于句子/单词的复习调度。
+     5→Rating: 1=Again, 2=Hard, 3=Good, 4=Easy
+     6→
+     7→关键设计：
+     8→- 新卡片的 due 设为 0（远在过去），确保可以被新卡片查询找到
+     9→- 但 get_due_cards 和 get_review_queue 区分"真正到期的复习卡片"和"新卡片"
+    10→- 到期复习 = state != NEW 且 due <= now
+    11→- 新卡片 = state == NEW（due=0 不算到期复习）
+    12→- 顺序模式：不因 FSRS 复习打断顺序，FSRS 复习嵌入顺序进度中
+    13→
+    14→多用户支持：cards 和 review_log 表均包含 user_id 字段，
+    15→所有查询均按 user_id 过滤。向后兼容：默认 user_id='default'。
+    16→"""
+    17→
+    18→import sqlite3
+    19→import time
+    20→import math
+    21→import json
+    22→from pathlib import Path
+    23→from datetime import datetime, timedelta
+    24→from typing import Optional, List, Dict
+    25→
+    26→# FSRS 默认参数 (w[0]~w[17])
+    27→DEFAULT_FSRS_PARAMS = [
+    28→    0.4072, 1.1829, 3.1262, 15.4722, 7.2102, 0.5316, 1.0651, 0.0589,
+    29→    0.3498, 1.1168, 0.5772, 0.1140, 0.4985, 0.2928, 2.1207, 0.0,
+    30→    0.4506, 0.8500
+    31→]
+    32→
+    33→DB_PATH = Path(__file__).parent / "phonos_fsrs.db"
+    34→
+    35→
+    36→class Card:
+    37→    """FSRS 卡片"""
+    38→    __slots__ = [
+    39→        'card_id', 'difficulty', 'stability', 'retrievability',
+    40→        'state', 'due', 'last_review', 'reps', 'lapses',
+    41→        'elapsed_days', 'scheduled_days', 'created_at'
+    42→    ]
+    43→
+    44→    # State
+    45→    NEW = 0
+    46→    LEARNING = 1
+    47→    REVIEW = 2
+    48→    RELEARNING = 3
+    49→
+    50→    def __init__(self, card_id: str):
+    51→        self.card_id = card_id
+    52→        self.difficulty = 0.0
+    53→        self.stability = 0.0
+    54→        self.retrievability = 0.0
+    55→        self.state = self.NEW
+    56→        # 关键修复：新卡片的 due 设为 0，不再用 time.time()
+    57→        # 这样 get_due_cards(到期复习) 不会把新卡片算进去
+    58→        # 新卡片通过 state=0 来识别，而不是 due 时间
+    59→        self.due = 0.0
+    60→        self.last_review = 0.0
+    61→        self.reps = 0
+    62→        self.lapses = 0
+    63→        self.elapsed_days = 0
+    64→        self.scheduled_days = 0
+    65→        self.created_at = time.time()
+    66→
+    67→
+    68→def _init_decay(w):
+    69→    return max(0.01, w[17])
+    70→
+    71→
+    72→def _init_stability(w, rating: int) -> float:
+    73→    return max(0.1, w[rating - 1])
+    74→
+    75→
+    76→def _init_difficulty(w, rating: int) -> float:
+    77→    return min(max(1.0, w[4] - w[5] * (rating - 3)), 10.0)
+    78→
+    79→
+    80→def _next_difficulty(w, d: float, rating: int) -> float:
+    81→    delta = w[5] * (rating - 3)
+    82→    new_d = d - delta
+    83→    # Mean revert
+    84→    w6 = w[6]
+    85→    new_d = w6 * _init_difficulty(w, 4) + (1 - w6) * new_d
+    86→    return min(max(1.0, new_d), 10.0)
+    87→
+    88→
+    89→def _next_recall_stability(w, d: float, s: float, r: float, rating: int) -> float:
+    90→    hard_penalty = w[15] if rating == 2 else 1.0
+    91→    easy_bonus = w[16] if rating == 4 else 1.0
+    92→    new_s = s * (1 + math.exp(w[7]) * (11 - d) * (s ** (-w[8])) *
+    93→                 (math.exp(w[9] * (1 - r)) - 1) * hard_penalty * easy_bonus)
+    94→    return max(0.1, min(new_s, 36500.0))
+    95→
+    96→
+    97→def _next_forget_stability(w, d: float, s: float, r: float) -> float:
+    98→    new_s = w[10] * (d ** (-w[11])) * ((s + 1) ** w[12] - 1) * math.exp(w[13] * (1 - r))
+    99→    return max(0.1, min(new_s, s))
+   100→
+   101→
+   102→def _retrievability(elapsed_days: float, stability: float, decay: float) -> float:
+   103→    return (1 + elapsed_days / (9 * stability)) ** (-1 / decay)
+   104→
+   105→
+   106→def _next_interval(s: float, r: float, decay: float) -> float:
+   107→    """计算下次复习间隔（天）"""
+   108→    if r <= 0:
+   109→        return 1.0
+   110→    # 目标可回忆率 0.9
+   111→    return max(1.0, 9 * s * (r ** decay - 1))
+   112→
+   113→
+   114→class FSRSScheduler:
+   115→    """FSRS 调度器"""
+   116→
+   117→    def __init__(self, params=None):
+   118→        self.w = params or DEFAULT_FSRS_PARAMS
+   119→        self.decay = _init_decay(self.w)
+   120→
+   121→    def review(self, card: Card, rating: int, now: float = None) -> Card:
+   122→        """对卡片进行复习评分"""
+   123→        if now is None:
+   124→            now = time.time()
+   125→
+   126→        if card.state == Card.NEW:
+   127→            card.stability = _init_stability(self.w, rating)
+   128→            card.difficulty = _init_difficulty(self.w, rating)
+   129→            # FSRS-4.5: 根据评级设置不同的初始状态
+   130→            # Again(1)/Hard(2) → LEARNING, Good(3)/Easy(4) → REVIEW
+   131→            if rating >= 3:
+   132→                card.state = Card.REVIEW
+   133→            else:
+   134→                card.state = Card.LEARNING
+   135→        else:
+   136→            elapsed = max(0, (now - card.last_review) / 86400.0) if card.last_review > 0 else 0
+   137→            card.elapsed_days = elapsed
+   138→
+   139→            if card.stability > 0:
+   140→                card.retrievability = _retrievability(elapsed, card.stability, self.decay)
+   141→            else:
+   142→                card.retrievability = 0
+   143→
+   144→            if rating >= 3:  # Good / Easy
+   145→                card.stability = _next_recall_stability(
+   146→                    self.w, card.difficulty, card.stability, card.retrievability, rating)
+   147→                card.difficulty = _next_difficulty(self.w, card.difficulty, rating)
+   148→                if card.state == Card.RELEARNING:
+   149→                    card.state = Card.REVIEW
+   150→                else:
+   151→                    card.state = Card.REVIEW
+   152→            else:  # Again / Hard
+   153→                if rating == 1:
+   154→                    card.lapses += 1
+   155→                    card.stability = _next_forget_stability(
+   156→                        self.w, card.difficulty, card.stability, card.retrievability)
+   157→                    card.state = Card.RELEARNING
+   158→                else:  # Hard
+   159→                    card.stability = _next_recall_stability(
+   160→                        self.w, card.difficulty, card.stability, card.retrievability, rating)
+   161→                    card.difficulty = _next_difficulty(self.w, card.difficulty, rating)
+   162→
+   163→        card.reps += 1
+   164→        card.last_review = now
+   165→        card.retrievability = _retrievability(0, card.stability, self.decay)
+   166→        card.scheduled_days = _next_interval(card.stability, card.retrievability, self.decay)
+   167→        card.due = now + card.scheduled_days * 86400
+   168→
+   169→        return card
+   170→
+   171→
+   172→class FSRSDatabase:
+   173→    """FSRS SQLite 数据库（支持多用户）"""
+   174→
+   175→    def __init__(self, db_path: str = None):
+   176→        self.db_path = db_path or str(DB_PATH)
+   177→        self.scheduler = FSRSScheduler()
+   178→        self._init_db()
+   179→
+   180→    def _init_db(self):
+   181→        conn = sqlite3.connect(self.db_path)
+   182→        conn.executescript("""
+   183→            CREATE TABLE IF NOT EXISTS cards (
+   184→                card_id TEXT NOT NULL,
+   185→                card_type TEXT NOT NULL DEFAULT 'sentence',
+   186→                user_id TEXT NOT NULL DEFAULT 'default',
+   187→                difficulty REAL NOT NULL DEFAULT 0,
+   188→                stability REAL NOT NULL DEFAULT 0,
+   189→                state INTEGER NOT NULL DEFAULT 0,
+   190→                due REAL NOT NULL DEFAULT 0,
+   191→                last_review REAL NOT NULL DEFAULT 0,
+   192→                reps INTEGER NOT NULL DEFAULT 0,
+   193→                lapses INTEGER NOT NULL DEFAULT 0,
+   194→                scheduled_days REAL NOT NULL DEFAULT 0,
+   195→                created_at REAL NOT NULL DEFAULT 0,
+   196→                PRIMARY KEY (card_id, user_id)
+   197→            );
+   198→
+   199→            CREATE TABLE IF NOT EXISTS review_log (
+   200→                id INTEGER PRIMARY KEY AUTOINCREMENT,
+   201→                card_id TEXT NOT NULL,
+   202→                user_id TEXT NOT NULL DEFAULT 'default',
+   203→                rating INTEGER NOT NULL,
+   204→                state INTEGER NOT NULL,
+   205→                due REAL NOT NULL,
+   206→                review_time REAL NOT NULL,
+   207→                elapsed_days REAL NOT NULL DEFAULT 0
+   208→            );
+   209→
+   210→            CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
+   211→            CREATE INDEX IF NOT EXISTS idx_cards_state ON cards(state);
+   212→            CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id);
+   213→            CREATE INDEX IF NOT EXISTS idx_cards_user_type ON cards(user_id, card_type);
+   214→            CREATE INDEX IF NOT EXISTS idx_review_card ON review_log(card_id);
+   215→            CREATE INDEX IF NOT EXISTS idx_review_user ON review_log(user_id);
+   216→        """)
+   217→        conn.commit()
+   218→
+   219→        # Migration: add user_id columns if they don't exist
+   220→        self._migrate_add_user_id(conn)
+   221→
+   222→        # Migration: 修复旧数据 - 把 due=创建时间 且 state=0 的卡片 due 改为 0
+   223→        self._migrate_fix_new_card_due(conn)
+   224→
+   225→        conn.close()
+   226→
+   227→    def _migrate_add_user_id(self, conn):
+   228→        """迁移：为旧表添加 user_id 列"""
+   229→        # Check cards table
+   230→        cards_cols = [row[1] for row in conn.execute("PRAGMA table_info(cards)").fetchall()]
+   231→        if 'user_id' not in cards_cols:
+   232→            conn.execute("ALTER TABLE cards ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
+   233→            # Recreate primary key by recreating table
+   234→            conn.executescript("""
+   235→                CREATE TABLE cards_new (
+   236→                    card_id TEXT NOT NULL,
+   237→                    card_type TEXT NOT NULL DEFAULT 'sentence',
+   238→                    user_id TEXT NOT NULL DEFAULT 'default',
+   239→                    difficulty REAL NOT NULL DEFAULT 0,
+   240→                    stability REAL NOT NULL DEFAULT 0,
+   241→                    state INTEGER NOT NULL DEFAULT 0,
+   242→                    due REAL NOT NULL DEFAULT 0,
+   243→                    last_review REAL NOT NULL DEFAULT 0,
+   244→                    reps INTEGER NOT NULL DEFAULT 0,
+   245→                    lapses INTEGER NOT NULL DEFAULT 0,
+   246→                    scheduled_days REAL NOT NULL DEFAULT 0,
+   247→                    created_at REAL NOT NULL DEFAULT 0,
+   248→                    PRIMARY KEY (card_id, user_id)
+   249→                );
+   250→                INSERT INTO cards_new SELECT * FROM cards;
+   251→                DROP TABLE cards;
+   252→                ALTER TABLE cards_new RENAME TO cards;
+   253→                CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(due);
+   254→                CREATE INDEX IF NOT EXISTS idx_cards_state ON cards(state);
+   255→                CREATE INDEX IF NOT EXISTS idx_cards_user ON cards(user_id);
+   256→                CREATE INDEX IF NOT EXISTS idx_cards_user_type ON cards(user_id, card_type);
+   257→            """)
+   258→
+   259→        # Check review_log table
+   260→        review_cols = [row[1] for row in conn.execute("PRAGMA table_info(review_log)").fetchall()]
+   261→        if 'user_id' not in review_cols:
+   262→            conn.execute("ALTER TABLE review_log ADD COLUMN user_id TEXT NOT NULL DEFAULT 'default'")
+   263→            conn.execute("CREATE INDEX IF NOT EXISTS idx_review_user ON review_log(user_id)")
+   264→
+   265→        conn.commit()
+   266→
+   267→    def _migrate_fix_new_card_due(self, conn):
+   268→        """修复旧数据：新卡片(state=0)的 due 应为 0，不是创建时间
+   269→        
+   270→        旧版本 ensure_card 没有显式设置 due，导致 SQLite 默认值 0，
+   271→        但旧版 Card.__init__ 里 due=time.time()，如果通过 review_card 创建
+   272→        的卡片可能导致 state=0 但 due!=0。
+   273→        
+   274→        统一修复：state=0 且 reps=0 的卡片，due 设为 0。
+   275→        """
+   276→        try:
+   277→            conn.execute(
+   278→                "UPDATE cards SET due = 0 WHERE state = 0 AND reps = 0 AND due != 0"
+   279→            )
+   280→            conn.commit()
+   281→        except Exception:
+   282→            pass
+   283→
+   284→    def _get_conn(self):
+   285→        return sqlite3.connect(self.db_path)
+   286→
+   287→    def ensure_card(self, card_id: str, card_type: str = "sentence", user_id: str = "default"):
+   288→        """确保卡片存在"""
+   289→        conn = self._get_conn()
+   290→        row = conn.execute(
+   291→            "SELECT card_id FROM cards WHERE card_id = ? AND user_id = ?",
+   292→            (card_id, user_id)
+   293→        ).fetchone()
+   294→        if not row:
+   295→            now = time.time()
+   296→            conn.execute(
+   297→                "INSERT INTO cards (card_id, card_type, user_id, due, created_at) VALUES (?, ?, ?, 0, ?)",
+   298→                (card_id, card_type, user_id, now)
+   299→            )
+   300→            conn.commit()
+   301→        conn.close()
+   302→
+   303→    def get_card(self, card_id: str, user_id: str = "default") -> Optional[Card]:
+   304→        """获取卡片"""
+   305→        conn = self._get_conn()
+   306→        row = conn.execute(
+   307→            "SELECT card_id, difficulty, stability, state, due, last_review, reps, lapses, scheduled_days, created_at "
+   308→            "FROM cards WHERE card_id = ? AND user_id = ?",
+   309→            (card_id, user_id)
+   310→        ).fetchone()
+   311→        conn.close()
+   312→        if not row:
+   313→            return None
+   314→        card = Card(row[0])
+   315→        card.difficulty = row[1]
+   316→        card.stability = row[2]
+   317→        card.state = row[3]
+   318→        card.due = row[4]
+   319→        card.last_review = row[5]
+   320→        card.reps = row[6]
+   321→        card.lapses = row[7]
+   322→        card.scheduled_days = row[8]
+   323→        card.created_at = row[9]
+   324→        return card
+   325→
+   326→    def get_card_info(self, card_id: str, user_id: str = "default") -> Optional[dict]:
+   327→        """获取卡片详细信息（含可回忆率）"""
+   328→        card = self.get_card(card_id, user_id)
+   329→        if not card:
+   330→            return None
+   331→        now = time.time()
+   332→        elapsed = max(0, (now - card.last_review) / 86400.0) if card.last_review > 0 else 0
+   333→        if card.stability > 0 and card.state != Card.NEW:
+   334→            ret = _retrievability(elapsed, card.stability, self.scheduler.decay)
+   335→        else:
+   336→            ret = 0
+   337→
+   338→        return {
+   339→            "card_id": card.card_id,
+   340→            "state": card.state,
+   341→            "state_name": ["new", "learning", "review", "relearning"][card.state],
+   342→            "difficulty": round(card.difficulty, 2),
+   343→            "stability": round(card.stability, 2),
+   344→            "retrievability": round(ret, 4),
+   345→            "due": card.due,
+   346→            "scheduled_days": round(card.scheduled_days, 1),
+   347→            "reps": card.reps,
+   348→            "lapses": card.lapses,
+   349→            "last_review": card.last_review,
+   350→        }
+   351→
+   352→    def review_card(self, card_id: str, rating: int, card_type: str = "sentence", user_id: str = "default") -> dict:
+   353→        """复习卡片并返回结果"""
+   354→        self.ensure_card(card_id, card_type, user_id)
+   355→        card = self.get_card(card_id, user_id)
+   356→        now = time.time()
+   357→
+   358→        old_state = card.state
+   359→        card = self.scheduler.review(card, rating, now)
+   360→
+   361→        conn = self._get_conn()
+   362→        conn.execute("""
+   363→            UPDATE cards SET difficulty=?, stability=?, state=?, due=?, last_review=?,
+   364→            reps=?, lapses=?, scheduled_days=? WHERE card_id=? AND user_id=?
+   365→        """, (card.difficulty, card.stability, card.state, card.due,
+   366→              card.last_review, card.reps, card.lapses, card.scheduled_days, card_id, user_id))
+   367→
+   368→        conn.execute("""
+   369→            INSERT INTO review_log (card_id, user_id, rating, state, due, review_time, elapsed_days)
+   370→            VALUES (?, ?, ?, ?, ?, ?, ?)
+   371→        """, (card_id, user_id, rating, old_state, card.due, now, card.elapsed_days))
+   372→
+   373→        conn.commit()
+   374→        conn.close()
+   375→
+   376→        due_dt = datetime.fromtimestamp(card.due)
+   377→        return {
+   378→            "card_id": card_id,
+   379→            "rating": rating,
+   380→            "state": card.state,
+   381→            "state_name": ["new", "learning", "review", "relearning"][card.state],
+   382→            "difficulty": round(card.difficulty, 2),
+   383→            "stability": round(card.stability, 2),
+   384→            "retrievability": round(card.retrievability, 4),
+   385→            "scheduled_days": round(card.scheduled_days, 1),
+   386→            "due": due_dt.isoformat(),
+   387→            "reps": card.reps,
+   388→            "lapses": card.lapses,
+   389→        }
+   390→
+   391→    def get_due_cards(self, card_type: str = "sentence", user_id: str = "default", limit: int = 20) -> List[dict]:
+   392→        """获取真正到期的复习卡片（state != NEW 且 due <= now）
+   393→        
+   394→        关键：只返回已经学习过、现在到期的卡片，不包括新卡片。
+   395→        """
+   396→        now = time.time()
+   397→        conn = self._get_conn()
+   398→        rows = conn.execute(
+   399→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   400→            "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ORDER BY due ASC LIMIT ?",
+   401→            (card_type, user_id, now, limit)
+   402→        ).fetchall()
+   403→        conn.close()
+   404→
+   405→        result = []
+   406→        for r in rows:
+   407→            result.append({
+   408→                "card_id": r[0],
+   409→                "state": r[1],
+   410→                "state_name": ["new", "learning", "review", "relearning"][r[1]],
+   411→                "due": r[2],
+   412→                "scheduled_days": r[3],
+   413→                "reps": r[4],
+   414→                "difficulty": round(r[5], 2),
+   415→                "stability": round(r[6], 2),
+   416→            })
+   417→        return result
+   418→
+   419→    def get_due_count(self, card_type: str = "sentence", user_id: str = "default") -> int:
+   420→        """获取到期复习卡片数量（不含新卡片）"""
+   421→        now = time.time()
+   422→        conn = self._get_conn()
+   423→        count = conn.execute(
+   424→            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0",
+   425→            (card_type, user_id, now)
+   426→        ).fetchone()[0]
+   427→        conn.close()
+   428→        return count
+   429→
+   430→    def get_pending_review_count(self, card_type: str = "word", user_id: str = "default") -> int:
+   431→        """获取待复习卡片数量（不含新词，用于"待复习"徽章）"""
+   432→        now = time.time()
+   433→        conn = self._get_conn()
+   434→        total = conn.execute(
+   435→            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=?", (card_type, user_id)
+   436→        ).fetchone()[0]
+   437→        new_count = conn.execute(
+   438→            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=? AND state=0", (card_type, user_id)
+   439→        ).fetchone()[0]
+   440→        mastered_count = conn.execute(
+   441→            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=? AND state=2 AND due > ? AND scheduled_days >= 3",
+   442→            (card_type, user_id, now)
+   443→        ).fetchone()[0]
+   444→        conn.close()
+   445→        pending = total - new_count - mastered_count
+   446→        return max(0, pending)
+   447→
+   448→    def get_total_reviewable_count(self, card_type: str = "word", user_id: str = "default") -> int:
+   449→        """获取可练习卡片数量（新词+待复习，不含已掌握，用于练习模式总数）"""
+   450→        now = time.time()
+   451→        conn = self._get_conn()
+   452→        total = conn.execute(
+   453→            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=?", (card_type, user_id)
+   454→        ).fetchone()[0]
+   455→        mastered_count = conn.execute(
+   456→            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=? AND state=2 AND due > ? AND scheduled_days >= 3",
+   457→            (card_type, user_id, now)
+   458→        ).fetchone()[0]
+   459→        conn.close()
+   460→        return max(0, total - mastered_count)
+   461→
+   462→    def get_next_word_for_practice(self, user_id: str = "default", new_ratio: float = 0.7) -> Optional[dict]:
+   463→        """获取下一个练习单词（FSRS驱动，新词优先，穿插到期复习）
+   464→        
+   465→        策略（区别于 get_next_word_for_review）：
+   466→        - 新词占约 70%，到期复习占约 30%
+   467→        - 随机混合，避免全是新词或全是复习
+   468→        - 已掌握的（REVIEW + 未到期 + 间隔>=3天）不推荐
+   469→        - 错误次数多的词优先级提升
+   470→        """
+   471→        import random
+   472→        now = time.time()
+   473→        conn = self._get_conn()
+   474→
+   475→        # 获取所有未掌握的卡片
+   476→        # NEW + LEARNING + RELEARNING + REVIEW到期/间隔<3天
+   477→        rows = conn.execute(
+   478→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   479→            "FROM cards WHERE card_type='word' AND user_id=? "
+   480→            "AND NOT (state=2 AND due > ? AND scheduled_days >= 3) "
+   481→            "ORDER BY CASE WHEN state=0 THEN 0 ELSE 1 END, "
+   482→            "CASE WHEN state != 0 AND due <= ? THEN 0 ELSE 1 END, "
+   483→            "difficulty DESC, reps ASC",
+   484→            (user_id, now, now)
+   485→        ).fetchall()
+   486→        conn.close()
+   487→
+   488→        if not rows:
+   489→            return None
+   490→
+   491→        # 分类
+   492→        new_cards = [r for r in rows if r[1] == 0]
+   493→        due_review_cards = [r for r in rows if r[1] != 0 and r[2] <= now and r[2] > 0]
+   494→        learning_cards = [r for r in rows if r[1] in (1, 3)]
+   495→        # REVIEW 但未掌握（due > now 但 scheduled_days < 3）——之前遗漏的关键分类
+   496→        # r[3] = scheduled_days（SELECT: card_id(0), state(1), due(2), scheduled_days(3), reps(4), difficulty(5), stability(6)）
+   497→        unmastered_review_cards = [r for r in rows if r[1] == 2 and not (r[2] > now and r[3] >= 3)]
+   498→
+   499→        # 优先级：到期复习 > 学习中 > 未掌握复习 > 新词
+   500→        # 使用加权随机
+   501→        candidates = []
+   502→        weights = []
+   503→
+   504→        for r in due_review_cards:
+   505→            candidates.append(r)
+   506→            weights.append(3.0)  # 到期复习权重最高
+   507→        for r in learning_cards:
+   508→            candidates.append(r)
+   509→            weights.append(2.5)  # 学习中权重次之
+   510→        for r in unmastered_review_cards:
+   511→            candidates.append(r)
+   512→            weights.append(2.0)  # 未掌握复习权重再次之
+   513→        for r in new_cards:
+   514→            candidates.append(r)
+   515→            weights.append(1.0)  # 新词权重基础
+   516→
+   517→        if not candidates:
+   518→            return None
+   519→
+   520→        # 加权随机选择
+   521→        total_weight = sum(weights)
+   522→        rand = random.random() * total_weight
+   523→        cumulative = 0
+   524→        chosen = candidates[0]
+   525→        for c, w in zip(candidates, weights):
+   526→            cumulative += w
+   527→            if rand <= cumulative:
+   528→                chosen = c
+   529→                break
+   530→
+   531→        state = chosen[1]
+   532→        return {
+   533→            "card_id": chosen[0],
+   534→            "type": "new" if state == 0 else "review",
+   535→            "state": state,
+   536→            "state_name": ["new", "learning", "review", "relearning"][state],
+   537→            "due": chosen[2],
+   538→            "scheduled_days": chosen[3],
+   539→            "reps": chosen[4],
+   540→            "difficulty": round(chosen[5], 2),
+   541→            "stability": round(chosen[6], 2),
+   542→        }
+   543→
+   544→    def get_new_cards(self, card_type: str = "sentence", user_id: str = "default", limit: int = 10) -> List[str]:
+   545→        """获取新卡片ID"""
+   546→        conn = self._get_conn()
+   547→        rows = conn.execute(
+   548→            "SELECT card_id FROM cards WHERE card_type=? AND user_id=? AND state=0 ORDER BY created_at ASC LIMIT ?",
+   549→            (card_type, user_id, limit)
+   550→        ).fetchall()
+   551→        conn.close()
+   552→        return [r[0] for r in rows]
+   553→
+   554→    def get_new_card_count(self, card_type: str = "sentence", user_id: str = "default") -> int:
+   555→        """获取新卡片数量"""
+   556→        conn = self._get_conn()
+   557→        count = conn.execute(
+   558→            "SELECT COUNT(*) FROM cards WHERE card_type=? AND user_id=? AND state=0",
+   559→            (card_type, user_id)
+   560→        ).fetchone()[0]
+   561→        conn.close()
+   562→        return count
+   563→
+   564→    def get_review_queue(self, card_type: str = "sentence", user_id: str = "default", new_per_day: int = 5, review_limit: int = 50) -> List[dict]:
+   565→        """
+   566→        获取复习队列：混合到期复习卡片和新卡片
+   567→        策略：先返回到期复习卡片，再补新卡片
+   568→        
+   569→        关键：到期复习 = state != 0 且 due <= now 且 due > 0
+   570→        新卡片 = state == 0
+   571→        """
+   572→        now = time.time()
+   573→        conn = self._get_conn()
+   574→
+   575→        # 到期的复习卡片（真正学过且到期了）
+   576→        review_rows = conn.execute(
+   577→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   578→            "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ORDER BY due ASC LIMIT ?",
+   579→            (card_type, user_id, now, review_limit)
+   580→        ).fetchall()
+   581→
+   582→        # 新卡片
+   583→        new_rows = conn.execute(
+   584→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   585→            "FROM cards WHERE card_type=? AND user_id=? AND state = 0 ORDER BY created_at ASC LIMIT ?",
+   586→            (card_type, user_id, new_per_day)
+   587→        ).fetchall()
+   588→
+   589→        conn.close()
+   590→
+   591→        queue = []
+   592→        for r in review_rows:
+   593→            queue.append({
+   594→                "card_id": r[0],
+   595→                "type": "review",
+   596→                "state": r[1],
+   597→                "state_name": ["new", "learning", "review", "relearning"][r[1]],
+   598→                "due": r[2],
+   599→                "scheduled_days": r[3],
+   600→                "reps": r[4],
+   601→            })
+   602→
+   603→        for r in new_rows:
+   604→            queue.append({
+   605→                "card_id": r[0],
+   606→                "type": "new",
+   607→                "state": 0,
+   608→                "state_name": "new",
+   609→                "due": r[2],
+   610→                "scheduled_days": r[3],
+   611→                "reps": r[4],
+   612→            })
+   613→
+   614→        return queue
+   615→
+   616→    def get_next_word_for_review(self, user_id: str = "default") -> Optional[dict]:
+   617→        """获取下一个需要复习的单词（FSRS 优先）
+   618→        
+   619→        策略：
+   620→        1. 优先返回到期的复习单词（state != NEW, due <= now）
+   621→        2. 如果没有到期复习，返回 LEARNING/RELEARNING 的单词
+   622→        3. 如果还没有，返回 REVIEW 但未掌握的单词（due > now 但 scheduled_days < 3）
+   623→        4. 如果还没有，返回新单词（state = NEW）
+   624→        5. 已掌握的（REVIEW + due > now + scheduled_days >= 3）不推荐
+   625→        
+   626→        关键修复：之前遗漏了第3步，导致 REVIEW 状态但间隔不够的单词
+   627→        （即"待复习"但未到期的单词）永远不会被推荐复习，
+   628→        造成"0/17 复习完成"但实际有待复习单词的 bug。
+   629→        """
+   630→        now = time.time()
+   631→        conn = self._get_conn()
+   632→
+   633→        # 1. 到期的复习单词（按 due 排序，最早的优先）
+   634→        review_row = conn.execute(
+   635→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   636→            "FROM cards WHERE card_type='word' AND user_id=? AND state != 0 AND due <= ? AND due > 0 "
+   637→            "ORDER BY due ASC, difficulty DESC LIMIT 1",
+   638→            (user_id, now)
+   639→        ).fetchone()
+   640→
+   641→        if review_row:
+   642→            conn.close()
+   643→            return {
+   644→                "card_id": review_row[0],
+   645→                "type": "review",
+   646→                "state": review_row[1],
+   647→                "state_name": ["new", "learning", "review", "relearning"][review_row[1]],
+   648→                "due": review_row[2],
+   649→                "scheduled_days": review_row[3],
+   650→                "reps": review_row[4],
+   651→                "difficulty": round(review_row[5], 2),
+   652→                "stability": round(review_row[6], 2),
+   653→            }
+   654→
+   655→        # 2. LEARNING/RELEARNING 的单词（熟悉度还没过关）
+   656→        learning_row = conn.execute(
+   657→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   658→            "FROM cards WHERE card_type='word' AND user_id=? AND state IN (1, 3) "
+   659→            "ORDER BY due ASC, difficulty DESC LIMIT 1",
+   660→            (user_id,)
+   661→        ).fetchone()
+   662→
+   663→        if learning_row:
+   664→            conn.close()
+   665→            return {
+   666→                "card_id": learning_row[0],
+   667→                "type": "review",
+   668→                "state": learning_row[1],
+   669→                "state_name": ["new", "learning", "review", "relearning"][learning_row[1]],
+   670→                "due": learning_row[2],
+   671→                "scheduled_days": learning_row[3],
+   672→                "reps": learning_row[4],
+   673→                "difficulty": round(learning_row[5], 2),
+   674→                "stability": round(learning_row[6], 2),
+   675→            }
+   676→
+   677→        # 3. REVIEW 但未掌握的单词（due > now 但 scheduled_days < 3，间隔还不够稳固）
+   678→        # 这些单词虽然还没到期，但间隔太短说明熟悉度还不够，应该继续复习
+   679→        unmastered_review_row = conn.execute(
+   680→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   681→            "FROM cards WHERE card_type='word' AND user_id=? AND state = 2 "
+   682→            "AND NOT (due > ? AND scheduled_days >= 3) "
+   683→            "ORDER BY scheduled_days ASC, difficulty DESC LIMIT 1",
+   684→            (user_id, now)
+   685→        ).fetchone()
+   686→
+   687→        if unmastered_review_row:
+   688→            conn.close()
+   689→            return {
+   690→                "card_id": unmastered_review_row[0],
+   691→                "type": "review",
+   692→                "state": unmastered_review_row[1],
+   693→                "state_name": ["new", "learning", "review", "relearning"][unmastered_review_row[1]],
+   694→                "due": unmastered_review_row[2],
+   695→                "scheduled_days": unmastered_review_row[3],
+   696→                "reps": unmastered_review_row[4],
+   697→                "difficulty": round(unmastered_review_row[5], 2),
+   698→                "stability": round(unmastered_review_row[6], 2),
+   699→            }
+   700→
+   701→        # 4. 新单词（按创建时间排序，最早的优先）
+   702→        new_row = conn.execute(
+   703→            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+   704→            "FROM cards WHERE card_type='word' AND user_id=? AND state = 0 "
+   705→            "ORDER BY created_at ASC LIMIT 1",
+   706→            (user_id,)
+   707→        ).fetchone()
+   708→
+   709→        conn.close()
+   710→
+   711→        if new_row:
+   712→            return {
+   713→                "card_id": new_row[0],
+   714→                "type": "new",
+   715→                "state": 0,
+   716→                "state_name": "new",
+   717→                "due": new_row[2],
+   718→                "scheduled_days": new_row[3],
+   719→                "reps": new_row[4],
+   720→                "difficulty": round(new_row[5], 2),
+   721→                "stability": round(new_row[6], 2),
+   722→            }
+   723→
+   724→        return None
+   725→
+   726→    def get_word_review_stats(self, user_id: str = "default") -> dict:
+   727→        """获取单词复习统计
+   728→        
+   729→        掌握度分类（用户视角）：
+   730→        - mastered (已掌握): state=REVIEW 且 due > now 且 scheduled_days >= 3 
+   731→          （已复习且未到期，间隔>=3天说明短期记忆稳固）
+   732→        - due (待复习): 所有非NEW且非已掌握的卡片 = LEARNING + RELEARNING + REVIEW到期 + REVIEW间隔<3天
+   733→          （只要熟悉度没过关就需要复习）
+   734→        - learning (学习中): state=LEARNING 或 RELEARNING
+   735→        - new (新词): state=NEW (从未复习过)
+   736→        
+   737→        关键变更：待复习 = 总数 - 已掌握 - 新词
+   738→        这样只要FSRS还没判定为"已掌握"，就都算待复习
+   739→        """
+   740→        now = time.time()
+   741→        conn = self._get_conn()
+   742→
+   743→        total = conn.execute(
+   744→            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=?", (user_id,)
+   745→        ).fetchone()[0]
+   746→
+   747→        new_count = conn.execute(
+   748→            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state=0", (user_id,)
+   749→        ).fetchone()[0]
+   750→
+   751→        # 已掌握：REVIEW状态 + 未到期 + 间隔>=3天（短期记忆稳固）
+   752→        mastered_count = conn.execute(
+   753→            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state=2 AND due > ? AND scheduled_days >= 3", 
+   754→            (user_id, now)
+   755→        ).fetchone()[0]
+   756→
+   757→        # 待复习 = 总数 - 已掌握 - 新词
+   758→        due_count = total - mastered_count - new_count
+   759→        if due_count < 0:
+   760→            due_count = 0
+   761→
+   762→        learning_count = conn.execute(
+   763→            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state IN (1, 3)", (user_id,)
+   764→        ).fetchone()[0]
+   765→
+   766→        # 到期复习数（严格FSRS到期，用于复习队列调度）
+   767→        due_now_count = conn.execute(
+   768→            "SELECT COUNT(*) FROM cards WHERE card_type='word' AND user_id=? AND state != 0 AND due <= ? AND due > 0",
+   769→            (user_id, now)
+   770→        ).fetchone()[0]
+   771→
+   772→        conn.close()
+   773→
+   774→        return {
+   775→            "total": total,
+   776→            "new": new_count,
+   777→            "due": due_count,
+   778→            "due_now": due_now_count,
+   779→            "learning": learning_count,
+   780→            "mastered": mastered_count,
+   781→        }
+   782→
+   783→    def get_stats(self, user_id: str = "default") -> dict:
+   784→        """获取学习统计"""
+   785→        conn = self._get_conn()
+   786→        now = time.time()
+   787→
+   788→        total = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=?", (user_id,)).fetchone()[0]
+   789→        new = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=0", (user_id,)).fetchone()[0]
+   790→        learning = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=1", (user_id,)).fetchone()[0]
+   791→        review = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=2", (user_id,)).fetchone()[0]
+   792→        relearning = conn.execute("SELECT COUNT(*) FROM cards WHERE user_id=? AND state=3", (user_id,)).fetchone()[0]
+   793→        # 只算真正到期的复习卡片（不含新卡片）
+   794→        due_now = conn.execute(
+   795→            "SELECT COUNT(*) FROM cards WHERE user_id=? AND state != 0 AND due <= ? AND due > 0",
+   796→            (user_id, now)
+   797→        ).fetchone()[0]
+   798→
+   799→        total_reviews = conn.execute("SELECT COUNT(*) FROM review_log WHERE user_id=?", (user_id,)).fetchone()[0]
+   800→        today_start = now - (now % 86400)
+   801→        today_reviews = conn.execute(
+   802→            "SELECT COUNT(*) FROM review_log WHERE user_id=? AND review_time >= ?", (user_id, today_start)
+   803→        ).fetchone()[0]
+   804→
+   805→        avg_rating = conn.execute(
+   806→            "SELECT AVG(rating) FROM review_log WHERE user_id=? AND review_time >= ?", (user_id, today_start)
+   807→        ).fetchone()[0] or 0
+   808→
+   809→        conn.close()
+   810→
+   811→        return {
+   812→            "total_cards": total,
+   813→            "new": new,
+   814→            "learning": learning,
+   815→            "review": review,
+   816→            "relearning": relearning,
+   817→            "due_now": due_now,
+   818→            "total_reviews": total_reviews,
+   819→            "today_reviews": today_reviews,
+   820→            "today_avg_rating": round(avg_rating, 2),
+   821→        }
+   822→
+   823→
+   824→# 全局实例
+   825→_fsrs_db: Optional[FSRSDatabase] = None
+   826→
+   827→
+   828→def get_fsrs_db() -> FSRSDatabase:
+   829→    global _fsrs_db
+   830→    if _fsrs_db is None:
+   831→        _fsrs_db = FSRSDatabase()
+   832→    return _fsrs_db
+   833→
