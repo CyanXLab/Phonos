@@ -1,0 +1,1407 @@
+     1→     1→/* ============================================================
+     2→     2→   Phonos 口语练习平台 - 样式
+     3→     3→   ============================================================ */
+     4→     4→
+     5→     5→:root {
+     6→     6→    --pri: #4f46e5;
+     7→     7→    --pri-l: #818cf8;
+     8→     8→    --pri-d: #3730a3;
+     9→     9→    --ok: #22c55e;
+    10→    10→    --warn: #f59e0b;
+    11→    11→    --err: #ef4444;
+    12→    12→    --bg: #f4f6fb;
+    13→    13→    --card: #fff;
+    14→    14→    --text: #0f172a;
+    15→    15→    --text2: #475569;
+    16→    16→    --text3: #94a3b8;
+    17→    17→    --border: #e2e8f0;
+    18→    18→    --r: 14px;
+    19→    19→    --rs: 8px;
+    20→    20→}
+    21→    21→
+    22→    22→* { margin:0; padding:0; box-sizing:border-box; }
+    23→    23→
+    24→    24→body {
+    25→    25→    font-family: 'Inter', -apple-system, sans-serif;
+    26→    26→    background: var(--bg);
+    27→    27→    color: var(--text);
+    28→    28→    min-height: 100vh;
+    29→    29→    -webkit-font-smoothing: antialiased;
+    30→    30→}
+    31→    31→
+    32→    32→/* ---- Header ---- */
+    33→    33→.header {
+    34→    34→    background: rgba(255,255,255,0.88);
+    35→    35→    backdrop-filter: blur(20px);
+    36→    36→    border-bottom: 1px solid var(--border);
+    37→    37→    position: sticky; top:0; z-index:100;
+    38→    38→}
+    39→    39→.header-inner {
+    40→    40→    max-width: 640px; margin:0 auto;
+    41→    41→    padding: 12px 20px;
+    42→    42→    display:flex; justify-content:space-between; align-items:center;
+    43→    43→}
+    44→    44→.logo { display:flex; align-items:center; gap:8px; }
+    45→    45→.logo-mark {
+    46→    46→    width:32px; height:32px; border-radius:8px;
+    47→    47→    background: linear-gradient(135deg, var(--pri), var(--pri-l));
+    48→    48→    color:#fff; font-weight:800; font-size:16px;
+    49→    49→    display:flex; align-items:center; justify-content:center;
+    50→    50→}
+    51→    51→.logo-text { font-size:20px; font-weight:700; color:var(--text); }
+    52→    52→.header-actions { display:flex; align-items:center; gap:8px; }
+    53→    53→.btn-icon {
+    54→    54→    background:none; border:none; cursor:pointer; color:var(--text2);
+    55→    55→    padding:6px; border-radius:6px; transition:all .15s;
+    56→    56→    display:flex; align-items:center; justify-content:center;
+    57→    57→}
+    58→    58→.btn-icon:hover { background:var(--bg); color:var(--pri); }
+    59→    59→.status-dot {
+    60→    60→    width:8px; height:8px; border-radius:50%; background:#fbbf24;
+    61→    61→}
+    62→    62→.status-dot.online { background:var(--ok); }
+    63→    63→
+    64→    64→/* Review counter in header */
+    65→    65→.review-counter {
+    66→    66→    display:flex; align-items:center; gap:4px;
+    67→    67→    padding:4px 10px; border-radius:20px;
+    68→    68→    background:#eef2ff; color:var(--pri);
+    69→    69→    font-size:11px; font-weight:600;
+    70→    70→    white-space:nowrap;
+    71→    71→}
+    72→    72→.review-counter svg { opacity:0.7; }
+    73→    73→
+    74→    74→/* ---- Main ---- */
+    75→    75→.main {
+    76→    76→    max-width: 640px; margin:0 auto;
+    77→    77→    padding: 16px 16px 60px;
+    78→    78→    display:flex; flex-direction:column; gap:14px;
+    79→    79→}
+    80→    80→
+    81→    81→/* ---- Card ---- */
+    82→    82→.card {
+    83→    83→    background:var(--card); border-radius:var(--r);
+    84→    84→    box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(79,70,229,0.04);
+    85→    85→    padding:20px; border:1px solid rgba(0,0,0,0.04);
+    86→    86→    animation: fadeUp .35s ease-out;
+    87→    87→}
+    88→    88→@keyframes fadeUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+    89→    89→
+    90→    90→.card-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+    91→    91→.card-title-sm { font-size:15px; font-weight:700; color:var(--text); }
+    92→    92→.mini-title { font-size:13px; font-weight:700; color:var(--text2); margin-bottom:10px; text-transform:uppercase; letter-spacing:.5px; }
+    93→    93→
+    94→    94→/* ---- Sentence Card ---- */
+    95→    95→.badges-row { display:flex; align-items:center; gap:6px; }
+    96→    96→
+    97→    97→.diff-badge {
+    98→    98→    padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700;
+    99→    99→    text-transform:uppercase; letter-spacing:.5px;
+   100→   100→}
+   101→   101→.diff-badge.easy { background:#dcfce7; color:#166534; }
+   102→   102→.diff-badge.medium { background:#fef3c7; color:#92400e; }
+   103→   103→.diff-badge.hard { background:#fee2e2; color:#991b1b; }
+   104→   104→
+   105→   105→.review-badge {
+   106→   106→    padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700;
+   107→   107→    letter-spacing:.3px;
+   108→   108→}
+   109→   109→.review-badge.new { background:#e0e7ff; color:#3730a3; }
+   110→   110→.review-badge.review { background:#fef3c7; color:#92400e; }
+   111→   111→
+   112→   112→.sentence-en { font-size:22px; font-weight:700; line-height:1.45; color:var(--text); letter-spacing:-.01em; }
+   113→   113→.sentence-en.dictation-hidden { font-size:15px; font-weight:500; color:var(--pri); font-style:italic; }
+   114→   114→.sentence-zh { font-size:14px; color:var(--text2); margin-top:6px; }
+   115→   115→.sentence-zh.dictation-hidden { display:none; }
+   116→   116→
+   117→   117→.sentence-tools {
+   118→   118→    display:flex; align-items:center; gap:8px; margin-top:14px; flex-wrap:wrap;
+   119→   119→}
+   120→   120→.btn-tool {
+   121→   121→    display:inline-flex; align-items:center; gap:5px;
+   122→   122→    padding:6px 14px; border-radius:20px; border:1px solid var(--border);
+   123→   123→    background:#fff; color:var(--text2); font-size:13px; font-weight:500;
+   124→   124→    cursor:pointer; transition:all .15s;
+   125→   125→}
+   126→   126→.btn-tool:hover { border-color:var(--pri); color:var(--pri); background:#f5f3ff; }
+   127→   127→.btn-tool.active { border-color:var(--pri); color:var(--pri); background:#eef2ff; }
+   128→   128→
+   129→   129→/* ---- IPA Section with clickable phonemes ---- */
+   130→   130→.ipa-section {
+   131→   131→    margin-top:10px; padding:6px 8px;
+   132→   132→    background:#f8faff; border-radius:var(--rs);
+   133→   133→    border:1px solid #e0e7ff;
+   134→   134→}
+   135→   135→.ipa-phonemes {
+   136→   136→    display:flex; flex-wrap:wrap; gap:0; align-items:baseline;
+   137→   137→    font-size:13px; line-height:1.4;
+   138→   138→    letter-spacing:0;
+   139→   139→    word-break:break-all;
+   140→   140→}
+   141→   141→.ipa-chip {
+   142→   142→    display:inline; align-items:baseline;
+   143→   143→    padding:0 0.5px; border-radius:2px;
+   144→   144→    font-family: 'Lucida Sans Unicode', 'DejaVu Sans', sans-serif;
+   145→   145→    font-size:13px; font-weight:500; color:var(--pri);
+   146→   146→    cursor:pointer; transition:all .15s;
+   147→   147→    position:relative; user-select:none;
+   148→   148→    letter-spacing: -0.3px;
+   149→   149→}
+   150→   150→.ipa-chip:hover {
+   151→   151→    background:#eef2ff;
+   152→   152→}
+   153→   153→.ipa-chip:hover .ipa-speaker {
+   154→   154→    opacity:1;
+   155→   155→}
+   156→   156→.ipa-speaker {
+   157→   157→    opacity:0;
+   158→   158→    transition:opacity .15s;
+   159→   159→    display:inline; color:var(--pri-l);
+   160→   160→    font-size:9px;
+   161→   161→    vertical-align:super;
+   162→   162→    margin-left:1px;
+   163→   163→}
+   164→   164→.ipa-chip.playing {
+   165→   165→    animation: phonemePulse .4s ease-out;
+   166→   166→    background:#e0e7ff;
+   167→   167→}
+   168→   168→@keyframes phonemePulse {
+   169→   169→    0% { background:#eef2ff; }
+   170→   170→    40% { background:#c7d2fe; }
+   171→   171→    100% { background:#e0e7ff; }
+   172→   172→}
+   173→   173→.ipa-separator {
+   174→   174→    color:var(--text3); font-size:14px; font-weight:400;
+   175→   175→    padding:0 2px; user-select:none;
+   176→   176→    font-family: 'Lucida Sans Unicode', 'DejaVu Sans', sans-serif;
+   177→   177→}
+   178→   178→
+   179→   179→.phrases-section { margin-top:14px; padding-top:14px; border-top:1px solid var(--border); }
+   180→   180→.phrase-item {
+   181→   181→    margin-bottom:8px; padding:8px 12px; background:#f8fafc;
+   182→   182→    border-radius:var(--rs); border-left:3px solid var(--pri-l);
+   183→   183→}
+   184→   184→.phrase-en { font-size:14px; font-weight:600; color:var(--text); }
+   185→   185→.phrase-zh { font-size:12px; color:var(--text2); margin-top:2px; }
+   186→   186→.phrase-note { font-size:11px; color:var(--pri); margin-top:2px; }
+   187→   187→
+   188→   188→.cultural-note {
+   189→   189→    margin-top:12px; padding:10px 12px; background:#fffbeb;
+   190→   190→    border-radius:var(--rs); font-size:12px; color:#92400e; line-height:1.6;
+   191→   191→    border-left:3px solid #fbbf24;
+   192→   192→}
+   193→   193→
+   194→   194→/* ---- Words Card ---- */
+   195→   195→.words-list { display:flex; flex-direction:column; gap:6px; }
+   196→   196→.word-item {
+   197→   197→    display:grid; grid-template-columns:1fr auto;
+   198→   198→    align-items:start; padding:10px 12px; background:#f8fafc;
+   199→   199→    border-radius:var(--rs); transition:all .15s; cursor:pointer;
+   200→   200→}
+   201→   201→.word-item:hover { background:#eef2ff; }
+   202→   202→.word-main {}
+   203→   203→.word-word { font-size:15px; font-weight:700; color:var(--text); }
+   204→   204→.word-pos { font-size:11px; color:var(--pri); font-weight:600; margin-left:6px; }
+   205→   205→.word-phonetic { font-size:12px; color:var(--text3); font-family:monospace; margin-top:2px; }
+   206→   206→.word-ipa { font-size:13px; color:var(--pri); font-weight:600; font-family:'Courier New','Lucida Sans Unicode',monospace; }
+   207→   207→.word-meaning { font-size:13px; color:var(--text2); margin-top:3px; }
+   208→   208→.word-extra { font-size:11px; color:var(--pri); margin-top:3px; font-style:italic; }
+   209→   209→.word-freq {
+   210→   210→    display:flex; gap:2px; align-items:center;
+   211→   211→}
+   212→   212→.freq-dot { width:6px; height:6px; border-radius:50%; background:#e2e8f0; }
+   213→   213→.freq-dot.active { background:var(--pri); }
+   214→   214→
+   215→   215→/* ---- Dictation Card ---- */
+   216→   216→.dictation-card {
+   217→   217→    border:2px solid #e0e7ff;
+   218→   218→    background:linear-gradient(135deg,#fafbff,#f5f3ff);
+   219→   219→}
+   220→   220→.dictation-header-left {
+   221→   221→    display:flex; align-items:center; gap:8px;
+   222→   222→}
+   223→   223→.dictation-phase {
+   224→   224→    padding:2px 8px; border-radius:4px; font-size:10px; font-weight:700;
+   225→   225→    text-transform:uppercase; letter-spacing:.3px;
+   226→   226→    background:#e0e7ff; color:var(--pri);
+   227→   227→}
+   228→   228→.dictation-phase.practice {
+   229→   229→    background:#dcfce7; color:#166534;
+   230→   230→}
+   231→   231→.dictation-tts-controls {
+   232→   232→    display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+   233→   233→}
+   234→   234→.btn-tts-dictation {
+   235→   235→    font-size:12px; padding:4px 10px;
+   236→   236→}
+   237→   237→.speed-controls {
+   238→   238→    display:flex; gap:2px; background:#f1f5f9; border-radius:12px; padding:2px;
+   239→   239→}
+   240→   240→.speed-btn {
+   241→   241→    padding:3px 8px; border:none; border-radius:10px;
+   242→   242→    background:transparent; color:var(--text3); font-size:11px;
+   243→   243→    font-weight:600; cursor:pointer; transition:all .15s;
+   244→   244→    white-space:nowrap;
+   245→   245→}
+   246→   246→.speed-btn:hover { color:var(--pri); background:#eef2ff; }
+   247→   247→.speed-btn.active {
+   248→   248→    background:var(--pri); color:#fff;
+   249→   249→    box-shadow:0 1px 4px rgba(79,70,229,0.3);
+   250→   250→}
+   251→   251→
+   252→   252→.dictation-inputs {
+   253→   253→    display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;
+   254→   254→    margin:16px 0;
+   255→   255→    justify-content:center;
+   256→   256→}
+   257→   257→.dict-input-wrap {
+   258→   258→    display:flex; flex-direction:column; align-items:center; gap:3px;
+   259→   259→}
+   260→   260→.dict-input {
+   261→   261→    border:none; border-bottom:2px solid #c7d2fe;
+   262→   262→    background:transparent; font-size:18px; font-weight:600;
+   263→   263→    color:var(--text); text-align:center; padding:4px 2px;
+   264→   264→    width:100%; outline:none; transition:all .2s;
+   265→   265→    font-family:'Inter',sans-serif;
+   266→   266→}
+   267→   267→.dict-input:focus {
+   268→   268→    border-bottom-color:var(--pri);
+   269→   269→    border-bottom-width:3px;
+   270→   270→}
+   271→   271→.dict-input.correct {
+   272→   272→    border-bottom-color:var(--ok);
+   273→   273→    background:rgba(34,197,94,0.05);
+   274→   274→    color:var(--ok);
+   275→   275→}
+   276→   276→.dict-input.incorrect {
+   277→   277→    border-bottom-color:var(--err);
+   278→   278→    background:rgba(239,68,68,0.05);
+   279→   279→    color:var(--err);
+   280→   280→    text-decoration:line-through;
+   281→   281→}
+   282→   282→.dict-input.incorrect.partial {
+   283→   283→    border-bottom-color:#e67e22;
+   284→   284→    background:rgba(230,126,34,0.06);
+   285→   285→    color:#e67e22;
+   286→   286→    text-decoration:none;
+   287→   287→}
+   288→   288→.dict-input.near-correct {
+   289→   289→    border-bottom-color:#f0ad4e;
+   290→   290→    background:rgba(240,173,78,0.06);
+   291→   291→}
+   292→   292→.partial-hint {
+   293→   293→    font-size:12px;
+   294→   294→    color:#e67e22;
+   295→   295→    margin-left:8px;
+   296→   296→}
+   297→   297→.dict-hint {
+   298→   298→    font-size:11px; color:var(--text3); letter-spacing:2px;
+   299→   299→    font-family:monospace;
+   300→   300→}
+   301→   301→.dict-correct-answer {
+   302→   302→    font-size:13px; font-weight:700; color:var(--ok);
+   303→   303→    margin-top:2px;
+   304→   304→}
+   305→   305→
+   306→   306→.dictation-actions {
+   307→   307→    display:flex; justify-content:center; gap:10px; margin-top:8px;
+   308→   308→}
+   309→   309→.btn-dictation-check {
+   310→   310→    padding:10px 28px; font-size:14px;
+   311→   311→    border-radius:24px;
+   312→   312→}
+   313→   313→
+   314→   314→.btn-skip-dictation {
+   315→   315→    padding:10px 20px; font-size:13px;
+   316→   316→    border-radius:24px;
+   317→   317→    border: 2px solid var(--pri-l);
+   318→   318→    color: var(--pri);
+   319→   319→}
+   320→   320→.btn-skip-dictation:hover {
+   321→   321→    background: #eef2ff;
+   322→   322→    border-color: var(--pri);
+   323→   323→}
+   324→   324→
+   325→   325→.dictation-results {
+   326→   326→    margin-top:14px; padding-top:14px; border-top:1px solid var(--border);
+   327→   327→}
+   328→   328→.dict-result-summary {
+   329→   329→    display:flex; align-items:center; justify-content:center; gap:8px;
+   330→   330→    margin-bottom:10px; font-size:14px; font-weight:600;
+   331→   331→}
+   332→   332→.dict-result-summary .correct-count { color:var(--ok); }
+   333→   333→.dict-result-summary .total-count { color:var(--text2); }
+   334→   334→
+   335→   335→.dictation-transition {
+   336→   336→    margin-top:16px; display:flex; justify-content:center;
+   337→   337→}
+   338→   338→.btn-start-practice {
+   339→   339→    padding:12px 32px; font-size:15px;
+   340→   340→    border-radius:24px;
+   341→   341→    box-shadow:0 4px 16px rgba(79,70,229,0.25);
+   342→   342→}
+   343→   343→
+   344→   344→/* ---- Recording ---- */
+   345→   345→.waveform-wrap {
+   346→   346→    position:relative; width:100%; height:110px;
+   347→   347→    background:linear-gradient(135deg,#f8faff,#eef2ff);
+   348→   348→    border-radius:var(--rs); overflow:hidden; margin-bottom:16px;
+   349→   349→}
+   350→   350→#waveformCanvas { width:100%; height:100%; display:block; }
+   351→   351→.waveform-placeholder {
+   352→   352→    position:absolute; inset:0; display:flex; flex-direction:column;
+   353→   353→    align-items:center; justify-content:center; gap:8px;
+   354→   354→    color:var(--text3); font-size:13px; transition:opacity .2s;
+   355→   355→}
+   356→   356→.waveform-placeholder.hidden { opacity:0; pointer-events:none; }
+   357→   357→
+   358→   358→.rec-controls { display:flex; justify-content:center; }
+   359→   359→.btn-record {
+   360→   360→    background:none; border:none; cursor:pointer;
+   361→   361→    display:flex; flex-direction:column; align-items:center; gap:8px;
+   362→   362→    transition:transform .15s;
+   363→   363→}
+   364→   364→.btn-record:hover { transform:scale(1.05); }
+   365→   365→.btn-record:active { transform:scale(.97); }
+   366→   366→
+   367→   367→.rec-ring {
+   368→   368→    width:64px; height:64px; border-radius:50%;
+   369→   369→    background:linear-gradient(135deg,var(--pri),var(--pri-l));
+   370→   370→    display:flex; align-items:center; justify-content:center;
+   371→   371→    box-shadow:0 4px 20px rgba(79,70,229,0.3);
+   372→   372→    transition:all .3s;
+   373→   373→}
+   374→   374→.rec-ring.active {
+   375→   375→    background:linear-gradient(135deg,var(--err),#f87171);
+   376→   376→    box-shadow:0 4px 20px rgba(239,68,68,0.35);
+   377→   377→    animation:pulse-rec 1.5s ease-in-out infinite;
+   378→   378→}
+   379→   379→@keyframes pulse-rec { 0%,100%{box-shadow:0 4px 20px rgba(239,68,68,.35)} 50%{box-shadow:0 4px 30px rgba(239,68,68,.55)} }
+   380→   380→
+   381→   381→.rec-dot { width:24px; height:24px; background:#fff; border-radius:50%; transition:all .25s; }
+   382→   382→.rec-dot.stop { width:18px; height:18px; border-radius:4px; }
+   383→   383→.rec-label { font-size:13px; font-weight:500; color:var(--text2); }
+   384→   384→
+   385→   385→.rec-info {
+   386→   386→    text-align:center; margin-top:10px; display:flex; align-items:center;
+   387→   387→    justify-content:center; gap:6px; color:var(--err); font-size:15px;
+   388→   388→    font-weight:600; font-variant-numeric:tabular-nums;
+   389→   389→}
+   390→   390→.rec-blink {
+   391→   391→    width:8px; height:8px; border-radius:50%; background:var(--err);
+   392→   392→    animation:blink 1s ease-in-out infinite;
+   393→   393→}
+   394→   394→@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+   395→   395→
+   396→   396→/* Playback */
+   397→   397→.playback-bar {
+   398→   398→    display:flex; align-items:center; gap:10px; margin-top:14px;
+   399→   399→    padding:10px 14px; background:#f8fafc; border-radius:var(--rs);
+   400→   400→}
+   401→   401→.btn-play {
+   402→   402→    width:32px; height:32px; border-radius:50%; border:none;
+   403→   403→    background:var(--pri); color:#fff; cursor:pointer;
+   404→   404→    display:flex; align-items:center; justify-content:center;
+   405→   405→    transition:all .15s; flex-shrink:0;
+   406→   406→}
+   407→   407→.btn-play:hover { background:var(--pri-d); }
+   408→   408→.playback-progress { flex:1; height:4px; background:#e2e8f0; border-radius:2px; overflow:hidden; }
+   409→   409→.playback-fill { width:0%; height:100%; background:var(--pri); border-radius:2px; transition:width .1s; }
+   410→   410→.playback-time { font-size:12px; color:var(--text3); font-variant-numeric:tabular-nums; min-width:30px; }
+   411→   411→.btn-submit {
+   412→   412→    padding:8px 18px; border:none; border-radius:var(--rs);
+   413→   413→    background:linear-gradient(135deg,var(--pri),var(--pri-l));
+   414→   414→    color:#fff; font-size:13px; font-weight:600; cursor:pointer;
+   415→   415→    transition:all .15s; flex-shrink:0;
+   416→   416→}
+   417→   417→.btn-submit:hover { box-shadow:0 2px 12px rgba(79,70,229,.3); }
+   418→   418→
+   419→   419→/* Loading */
+   420→   420→.loading-card { display:flex; flex-direction:column; align-items:center; padding:36px 20px; }
+   421→   421→.spinner { width:40px; height:40px; border:3px solid #e2e8f0; border-top-color:var(--pri); border-radius:50%; animation:spin .7s linear infinite; margin-bottom:12px; }
+   422→   422→@keyframes spin { to{transform:rotate(360deg)} }
+   423→   423→.loading-card p { font-size:14px; color:var(--text2); }
+   424→   424→
+   425→   425→/* ---- Result Card ---- */
+   426→   426→.score-hero {
+   427→   427→    display:flex; justify-content:center; padding:8px 0 20px; position:relative;
+   428→   428→}
+   429→   429→.score-ring-svg { width:130px; height:130px; }
+   430→   430→.score-center {
+   431→   431→    position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+   432→   432→    display:flex; align-items:baseline; gap:2px;
+   433→   433→}
+   434→   434→.score-num { font-size:38px; font-weight:900; color:var(--pri); }
+   435→   435→.score-of { font-size:14px; color:var(--text3); }
+   436→   436→
+   437→   437→/* Sub scores */
+   438→   438→.sub-scores { display:flex; flex-direction:column; gap:10px; margin-bottom:20px; }
+   439→   439→.sub-row { display:flex; align-items:center; gap:10px; }
+   440→   440→.sub-name { font-size:13px; font-weight:500; min-width:90px; color:var(--text2); }
+   441→   441→.sub-bar { flex:1; height:6px; background:#eef2ff; border-radius:3px; overflow:hidden; }
+   442→   442→.sub-fill { height:100%; border-radius:3px; background:linear-gradient(90deg,var(--pri),var(--pri-l)); transition:width .8s cubic-bezier(.4,0,.2,1); width:0; }
+   443→   443→.sub-val { font-size:14px; font-weight:700; color:var(--pri); min-width:28px; text-align:right; }
+   444→   444→
+   445→   445→/* Word scores */
+   446→   446→.word-scores-sec, .phoneme-sec, .fluency-sec, .tips-sec, .fsrs-section {
+   447→   447→    padding-top:16px; border-top:1px solid var(--border); margin-top:16px;
+   448→   448→}
+   449→   449→.word-score-grid { display:flex; flex-wrap:wrap; gap:6px; }
+   450→   450→.ws-item {
+   451→   451→    padding:6px 12px; border-radius:var(--rs); background:#f8fafc;
+   452→   452→    border:1px solid var(--border); text-align:center;
+   453→   453→}
+   454→   454→.ws-item.err { border-color:#fca5a5; background:#fef2f2; }
+   455→   455→.ws-word { font-size:14px; font-weight:600; }
+   456→   456→.ws-acc { font-size:11px; font-weight:700; margin-top:2px; }
+   457→   457→.ws-acc.hi { color:var(--ok); }
+   458→   458→.ws-acc.md { color:var(--warn); }
+   459→   459→.ws-acc.lo { color:var(--err); }
+   460→   460→
+   461→   461→/* Phoneme compare */
+   462→   462→.phoneme-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap; }
+   463→   463→.ph-label { font-size:12px; font-weight:600; color:var(--text3); min-width:32px; }
+   464→   464→.ph-chips { display:flex; flex-wrap:wrap; gap:3px; }
+   465→   465→.ph-chip {
+   466→   466→    padding:2px 7px; border-radius:4px; font-size:11px;
+   467→   467→    font-weight:700; font-family:'Courier New','Lucida Sans Unicode',monospace;
+   468→   468→}
+   469→   469→.ph-chip.ok { background:#dcfce7; color:#166534; }
+   470→   470→.ph-chip.bad { background:#fee2e2; color:#991b1b; }
+   471→   471→.ph-chip.miss { background:#fef3c7; color:#92400e; }
+   472→   472→.ph-chip.extra { background:#e0e7ff; color:#3730a3; }
+   473→   473→.ph-chip.neu { background:#f1f5f9; color:#475569; }
+   474→   474→.ph-chip.clickable {
+   475→   475→    cursor: pointer;
+   476→   476→    transition: all .15s;
+   477→   477→}
+   478→   478→.ph-chip.clickable:hover {
+   479→   479→    transform: scale(1.15);
+   480→   480→    box-shadow: 0 2px 8px rgba(79,70,229,0.2);
+   481→   481→}
+   482→   482→.ph-chip.clickable.playing {
+   483→   483→    animation: phonemePulse .4s ease-out;
+   484→   484→    box-shadow: 0 2px 12px rgba(79,70,229,0.3);
+   485→   485→}
+   486→   486→
+   487→   487→/* Fluency */
+   488→   488→.flu-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+   489→   489→.flu-item { background:#f8fafc; border-radius:var(--rs); padding:10px; text-align:center; }
+   490→   490→.flu-label { display:block; font-size:11px; color:var(--text3); margin-bottom:3px; }
+   491→   491→.flu-val { font-size:16px; font-weight:700; color:var(--text); }
+   492→   492→
+   493→   493→/* Tips */
+   494→   494→.tips-list { display:flex; flex-direction:column; gap:10px; }
+   495→   495→.tip-card { border-radius:var(--rs); padding:14px; border-left:4px solid; }
+   496→   496→.tip-card.high { background:#fef2f2; border-color:var(--err); }
+   497→   497→.tip-card.medium { background:#fffbeb; border-color:var(--warn); }
+   498→   498→.tip-card.low { background:#eff6ff; border-color:#3b82f6; }
+   499→   499→.tip-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+   500→   500→.tip-badge {
+   501→   501→    font-size:10px; font-weight:700; text-transform:uppercase;
+   502→   502→    padding:2px 8px; border-radius:4px; letter-spacing:.3px;
+   503→   503→}
+   504→   504→.tip-card.high .tip-badge { background:#fecaca; color:#991b1b; }
+   505→   505→.tip-card.medium .tip-badge { background:#fde68a; color:#92400e; }
+   506→   506→.tip-card.low .tip-badge { background:#bfdbfe; color:#1e40af; }
+   507→   507→.tip-desc { font-size:14px; font-weight:600; color:var(--text); }
+   508→   508→.tip-body { font-size:12.5px; color:var(--text2); line-height:1.65; }
+   509→   509→.tip-body p { margin-bottom:5px; }
+   510→   510→.tip-body strong { color:var(--text); }
+   511→   511→.tip-practice { margin-top:8px; }
+   512→   512→.tip-pw {
+   513→   513→    display:inline-block; padding:2px 8px; margin:2px; border-radius:4px;
+   514→   514→    background:#eef2ff; color:var(--pri); font-size:11px; font-weight:600;
+   515→   515→}
+   516→   516→.tip-mp {
+   517→   517→    margin-top:8px; padding:8px 10px; background:rgba(79,70,229,.06);
+   518→   518→    border-radius:6px; font-size:12px; color:var(--pri-d);
+   519→   519→}
+   520→   520→.tip-mp strong { color:var(--pri); }
+   521→   521→
+   522→   522→/* ---- FSRS Rating Section ---- */
+   523→   523→.fsrs-hint {
+   524→   524→    font-size:13px; color:var(--text2); margin-bottom:12px; text-align:center;
+   525→   525→}
+   526→   526→.fsrs-buttons {
+   527→   527→    display:grid; grid-template-columns:repeat(4,1fr); gap:8px;
+   528→   528→}
+   529→   529→.fsrs-btn {
+   530→   530→    display:flex; flex-direction:column; align-items:center; gap:3px;
+   531→   531→    padding:12px 6px; border-radius:var(--rs); border:2px solid transparent;
+   532→   532→    background:#f8fafc; cursor:pointer; transition:all .2s;
+   533→   533→    text-align:center;
+   534→   534→}
+   535→   535→.fsrs-btn:hover { transform:translateY(-2px); box-shadow:0 4px 12px rgba(0,0,0,0.08); }
+   536→   536→.fsrs-btn:active { transform:translateY(0); }
+   537→   537→.fsrs-btn.selected { border-width:3px; }
+   538→   538→
+   539→   539→.fsrs-icon { font-size:20px; line-height:1; }
+   540→   540→.fsrs-label { font-size:12px; font-weight:700; color:var(--text); }
+   541→   541→.fsrs-desc { font-size:10px; color:var(--text3); font-weight:500; line-height:1.3; }
+   542→   542→
+   543→   543→.fsrs-again {
+   544→   544→    border-color:#fecaca; background:#fef2f2;
+   545→   545→}
+   546→   546→.fsrs-again:hover { background:#fee2e2; border-color:#f87171; }
+   547→   547→.fsrs-again.selected { border-color:#ef4444; background:#fee2e2; box-shadow:0 4px 16px rgba(239,68,68,.2); }
+   548→   548→
+   549→   549→.fsrs-hard {
+   550→   550→    border-color:#fed7aa; background:#fff7ed;
+   551→   551→}
+   552→   552→.fsrs-hard:hover { background:#ffedd5; border-color:#fb923c; }
+   553→   553→.fsrs-hard.selected { border-color:#f97316; background:#ffedd5; box-shadow:0 4px 16px rgba(249,115,22,.2); }
+   554→   554→
+   555→   555→.fsrs-good {
+   556→   556→    border-color:#bbf7d0; background:#f0fdf4;
+   557→   557→}
+   558→   558→.fsrs-good:hover { background:#dcfce7; border-color:#4ade80; }
+   559→   559→.fsrs-good.selected { border-color:#22c55e; background:#dcfce7; box-shadow:0 4px 16px rgba(34,197,94,.2); }
+   560→   560→
+   561→   561→.fsrs-easy {
+   562→   562→    border-color:#bfdbfe; background:#eff6ff;
+   563→   563→}
+   564→   564→.fsrs-easy:hover { background:#dbeafe; border-color:#60a5fa; }
+   565→   565→.fsrs-easy.selected { border-color:#3b82f6; background:#dbeafe; box-shadow:0 4px 16px rgba(59,130,246,.2); }
+   566→   566→
+   567→   567→/* Result actions */
+   568→   568→.result-actions {
+   569→   569→    display:flex; gap:10px; margin-top:18px; padding-top:18px;
+   570→   570→    border-top:1px solid var(--border);
+   571→   571→}
+   572→   572→.btn-primary {
+   573→   573→    flex:1; padding:12px 18px; border:none; border-radius:var(--rs);
+   574→   574→    background:linear-gradient(135deg,var(--pri),var(--pri-l));
+   575→   575→    color:#fff; font-size:14px; font-weight:600; cursor:pointer;
+   576→   576→    display:flex; align-items:center; justify-content:center; gap:6px;
+   577→   577→    transition:all .15s;
+   578→   578→}
+   579→   579→.btn-primary:hover { box-shadow:0 3px 14px rgba(79,70,229,.3); transform:translateY(-1px); }
+   580→   580→.btn-secondary {
+   581→   581→    flex:1; padding:12px 18px; border:2px solid var(--border); border-radius:var(--rs);
+   582→   582→    background:#fff; color:var(--text); font-size:14px; font-weight:600;
+   583→   583→    cursor:pointer; transition:all .15s;
+   584→   584→}
+   585→   585→.btn-secondary:hover { border-color:var(--pri); color:var(--pri); }
+   586→   586→
+   587→   587→/* ---- Modal ---- */
+   588→   588→.modal-overlay {
+   589→   589→    position:fixed; inset:0; background:rgba(0,0,0,.4);
+   590→   590→    z-index:200; display:flex; align-items:center; justify-content:center;
+   591→   591→    padding:16px; backdrop-filter:blur(4px);
+   592→   592→}
+   593→   593→.modal {
+   594→   594→    background:#fff; border-radius:var(--r); max-width:600px; width:100%;
+   595→   595→    max-height:85vh; overflow-y:auto; box-shadow:0 20px 60px rgba(0,0,0,.15);
+   596→   596→}
+   597→   597→.modal-header {
+   598→   598→    display:flex; justify-content:space-between; align-items:center;
+   599→   599→    padding:16px 20px; border-bottom:1px solid var(--border);
+   600→   600→    position:sticky; top:0; background:#fff; z-index:1;
+   601→   601→}
+   602→   602→.modal-header h3 { font-size:16px; font-weight:700; }
+   603→   603→.modal-close { font-size:18px; }
+   604→   604→.modal-body { padding:16px 20px; }
+   605→   605→
+   606→   606→/* Phoneme guide */
+   607→   607→.phoneme-guide-grid { display:flex; flex-direction:column; gap:8px; }
+   608→   608→.pg-item {
+   609→   609→    padding:12px; border-radius:var(--rs); background:#f8fafc;
+   610→   610→    border-left:3px solid var(--pri-l);
+   611→   611→    cursor:pointer; transition:all .15s;
+   612→   612→}
+   613→   613→.pg-item:hover { background:#eef2ff; }
+   614→   614→.pg-item:active { transform:scale(0.98); }
+   615→   615→.pg-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+   616→   616→.pg-symbol { font-size:18px; font-weight:800; color:var(--pri); font-family:monospace; }
+   617→   617→.pg-ipa { font-size:14px; color:var(--text2); font-family:monospace; }
+   618→   618→.pg-desc { font-size:12px; color:var(--text2); }
+   619→   619→.pg-detail { font-size:11.5px; color:var(--text2); line-height:1.6; }
+   620→   620→.pg-detail strong { color:var(--text); }
+   621→   621→.pg-words { margin-top:6px; }
+   622→   622→
+   623→   623→/* Stats */
+   624→   624→.stats-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px; }
+   625→   625→.stat-card { padding:14px; background:#f8fafc; border-radius:var(--rs); text-align:center; }
+   626→   626→.stat-card .sc-val { font-size:24px; font-weight:800; color:var(--pri); }
+   627→   627→.stat-card .sc-label { font-size:12px; color:var(--text3); margin-top:2px; }
+   628→   628→.error-pattern { padding:12px; background:#fef2f2; border-radius:var(--rs); }
+   629→   629→.error-pattern h4 { font-size:13px; color:var(--err); margin-bottom:6px; }
+   630→   630→.error-pattern p { font-size:12px; color:var(--text2); line-height:1.5; }
+   631→   631→
+   632→   632→/* Stats sections (collapsible) */
+   633→   633→.stats-section {
+   634→   634→    margin-top:12px; border:1px solid var(--border); border-radius:var(--rs);
+   635→   635→    overflow:hidden;
+   636→   636→}
+   637→   637→.stats-section-header {
+   638→   638→    display:flex; justify-content:space-between; align-items:center;
+   639→   639→    padding:12px 14px; background:#f8fafc; cursor:pointer;
+   640→   640→    transition:background .15s;
+   641→   641→}
+   642→   642→.stats-section-header:hover { background:#eef2ff; }
+   643→   643→.stats-section-title {
+   644→   644→    display:flex; align-items:center; gap:8px;
+   645→   645→    font-size:14px; font-weight:700; color:var(--text); margin:0;
+   646→   646→}
+   647→   647→.stats-section-summary {
+   648→   648→    display:flex; align-items:center; gap:6px;
+   649→   649→}
+   650→   650→.stats-badge {
+   651→   651→    display:inline-block; padding:2px 8px; border-radius:10px;
+   652→   652→    font-size:11px; font-weight:700; white-space:nowrap;
+   653→   653→}
+   654→   654→.stats-badge.ok { background:#dcfce7; color:#166534; }
+   655→   655→.stats-badge.warn { background:#fef3c7; color:#92400e; }
+   656→   656→.stats-badge.error { background:#fee2e2; color:#991b1b; }
+   657→   657→.stats-collapse-arrow {
+   658→   658→    font-size:10px; color:var(--text3); transition:transform .2s;
+   659→   659→    display:inline-block; margin-left:4px;
+   660→   660→}
+   661→   661→.stats-section-body {
+   662→   662→    padding:12px 14px; transition:max-height .3s ease-out, opacity .2s, padding .2s;
+   663→   663→    max-height:2000px; opacity:1;
+   664→   664→}
+   665→   665→.stats-section-body.stats-collapsed {
+   666→   666→    max-height:0; opacity:0; padding:0 14px; overflow:hidden;
+   667→   667→}
+   668→   668→.stats-summary-bar {
+   669→   669→    padding:8px 10px; background:#fef2f2; border-radius:6px;
+   670→   670→    font-size:12px; color:#991b1b; margin-bottom:10px; font-weight:500;
+   671→   671→}
+   672→   672→.stats-sub-title {
+   673→   673→    font-size:12px; font-weight:700; color:var(--text2); margin-bottom:8px;
+   674→   674→    text-transform:uppercase; letter-spacing:.3px;
+   675→   675→}
+   676→   676→
+   677→   677→/* Error detail items */
+   678→   678→.error-detail-item {
+   679→   679→    padding:8px 0; border-bottom:1px solid #f1f5f9;
+   680→   680→}
+   681→   681→.error-detail-item:last-of-type { border-bottom:none; }
+   682→   682→.error-detail-header {
+   683→   683→    display:flex; align-items:center; gap:8px; margin-bottom:4px;
+   684→   684→}
+   685→   685→.error-detail-ipa {
+   686→   686→    font-size:16px; font-weight:800; color:var(--pri);
+   687→   687→    font-family:'Lucida Sans Unicode','DejaVu Sans',sans-serif;
+   688→   688→}
+   689→   689→.error-detail-arpabet {
+   690→   690→    font-size:11px; color:var(--text3); font-family:monospace;
+   691→   691→}
+   692→   692→.error-detail-count {
+   693→   693→    font-size:13px; font-weight:700; margin-left:auto;
+   694→   694→}
+   695→   695→.error-detail-bar {
+   696→   696→    height:4px; background:#f1f5f9; border-radius:2px; overflow:hidden;
+   697→   697→}
+   698→   698→.error-detail-bar-fill {
+   699→   699→    height:100%; border-radius:2px; transition:width .5s ease-out;
+   700→   700→}
+   701→   701→
+   702→   702→/* Weak word items */
+   703→   703→.weak-word-item {
+   704→   704→    display:grid; grid-template-columns:auto 1fr auto auto;
+   705→   705→    align-items:center; gap:8px; padding:6px 0;
+   706→   706→    border-bottom:1px solid #f1f5f9;
+   707→   707→}
+   708→   708→.weak-word-item:last-of-type { border-bottom:none; }
+   709→   709→.weak-word-name {
+   710→   710→    font-size:13px; font-weight:700; color:var(--text); min-width:60px;
+   711→   711→}
+   712→   712→.weak-word-bar {
+   713→   713→    height:4px; background:#f1f5f9; border-radius:2px; overflow:hidden;
+   714→   714→}
+   715→   715→.weak-word-bar-fill {
+   716→   716→    height:100%; border-radius:2px; transition:width .5s ease-out;
+   717→   717→}
+   718→   718→.weak-word-score {
+   719→   719→    font-size:12px; font-weight:700; min-width:36px; text-align:right;
+   720→   720→}
+   721→   721→.weak-word-attempts {
+   722→   722→    font-size:11px; color:var(--text3); min-width:30px; text-align:right;
+   723→   723→}
+   724→   724→
+   725→   725→/* Mastered words */
+   726→   726→.mastered-words-grid {
+   727→   727→    display:flex; flex-wrap:wrap; gap:6px;
+   728→   728→}
+   729→   729→.mastered-word {
+   730→   730→    display:inline-block; padding:4px 10px; background:#dcfce7;
+   731→   731→    border-radius:12px; font-size:12px; font-weight:600; color:#166534;
+   732→   732→}
+   733→   733→.mastered-word-more {
+   734→   734→    display:inline-block; padding:4px 10px; background:#e0e7ff;
+   735→   735→    border-radius:12px; font-size:12px; font-weight:600; color:#3730a3;
+   736→   736→}
+   737→   737→
+   738→   738→/* Show more button */
+   739→   739→.stats-show-more {
+   740→   740→    display:block; width:100%; padding:10px; margin-top:8px;
+   741→   741→    background:none; border:1px dashed var(--border); border-radius:6px;
+   742→   742→    color:var(--pri); font-size:12px; font-weight:600; cursor:pointer;
+   743→   743→    transition:all .15s;
+   744→   744→}
+   745→   745→.stats-show-more:hover { background:#eef2ff; border-color:var(--pri); }
+   746→   746→
+   747→   747→/* Score history bar chart */
+   748→   748→.score-history {
+   749→   749→    display:flex; align-items:flex-end; gap:3px; height:60px; padding:4px 0;
+   750→   750→}
+   751→   751→.score-bar-item {
+   752→   752→    flex:1; height:100%; display:flex; align-items:flex-end;
+   753→   753→}
+   754→   754→.score-bar-fill {
+   755→   755→    width:100%; border-radius:2px 2px 0 0; transition:height .5s ease-out;
+   756→   756→    min-height:2px;
+   757→   757→}
+   758→   758→
+   759→   759→/* Footer */
+   760→   760→.footer { text-align:center; padding:20px; color:var(--text3); font-size:11px; }
+   761→   761→
+   762→   762→/* ---- Collapsible Sections ---- */
+   763→   763→.collapse-toggle {
+   764→   764→    display:flex; align-items:center; gap:6px;
+   765→   765→    cursor:pointer; user-select:none;
+   766→   766→}
+   767→   767→.collapse-toggle .collapse-arrow {
+   768→   768→    transition:transform .2s;
+   769→   769→    display:inline-flex;
+   770→   770→}
+   771→   771→.collapse-toggle.collapsed .collapse-arrow {
+   772→   772→    transform:rotate(-90deg);
+   773→   773→}
+   774→   774→.collapse-content {
+   775→   775→    overflow:hidden;
+   776→   776→    transition:max-height .3s ease-out, opacity .2s;
+   777→   777→    max-height:2000px;
+   778→   778→    opacity:1;
+   779→   779→}
+   780→   780→.collapse-content.collapsed {
+   781→   781→    max-height:0;
+   782→   782→    opacity:0;
+   783→   783→}
+   784→   784→
+   785→   785→/* ---- Responsive ---- */
+   786→   786→@media (max-width:480px) {
+   787→   787→    .sentence-en { font-size:18px; }
+   788→   788→    .score-num { font-size:32px; }
+   789→   789→    .result-actions { flex-direction:column; }
+   790→   790→    .fsrs-buttons { grid-template-columns:repeat(2,1fr); }
+   791→   791→    .dictation-inputs { gap:8px; }
+   792→   792→    .dict-input { font-size:16px; }
+   793→   793→    .review-counter { display:none; }
+   794→   794→}
+   795→   795→
+   796→   796→/* ---- Auth Modal ---- */
+   797→   797→.auth-modal { max-width: 400px; }
+   798→   798→.auth-field { margin-bottom: 16px; }
+   799→   799→.auth-field label { display: block; font-size: 13px; font-weight: 600; color: var(--text2); margin-bottom: 6px; }
+   800→   800→.auth-field input { width: 100%; padding: 10px 14px; border: 2px solid var(--border); border-radius: var(--rs); font-size: 15px; transition: border-color .15s; outline: none; background: #fff; }
+   801→   801→.auth-field input:focus { border-color: var(--pri); }
+   802→   802→.auth-submit { width: 100%; padding: 12px; margin-top: 8px; font-size: 15px; }
+   803→   803→.auth-switch { text-align: center; margin-top: 16px; font-size: 13px; color: var(--text3); }
+   804→   804→.auth-switch a { color: var(--pri); cursor: pointer; text-decoration: none; font-weight: 600; }
+   805→   805→.auth-switch a:hover { text-decoration: underline; }
+   806→   806→.auth-error { color: var(--err); font-size: 13px; margin-top: 8px; text-align: center; }
+   807→   807→.auth-divider { text-align: center; margin: 16px 0; position: relative; }
+   808→   808→.auth-divider::before, .auth-divider::after { content: ''; position: absolute; top: 50%; width: 40%; height: 1px; background: var(--border); }
+   809→   809→.auth-divider::before { left: 0; }
+   810→   810→.auth-divider::after { right: 0; }
+   811→   811→.auth-divider span { background: #fff; padding: 0 10px; font-size: 12px; color: var(--text3); position: relative; }
+   812→   812→.auth-guest-btn { width: 100%; padding: 10px; font-size: 14px; }
+   813→   813→
+   814→   814→/* ---- User Profile ---- */
+   815→   815→.user-profile { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 8px; border-radius: 20px; transition: background .15s; }
+   816→   816→.user-profile:hover { background: var(--bg); }
+   817→   817→.user-avatar { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #fff; }
+   818→   818→.user-name { font-size: 13px; font-weight: 600; color: var(--text); max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+   819→   819→
+   820→   820→/* User list in switcher */
+   821→   821→.user-list-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--rs); cursor: pointer; transition: background .15s; }
+   822→   822→.user-list-item:hover { background: #f0f0ff; }
+   823→   823→.user-list-item .user-avatar { width: 32px; height: 32px; font-size: 14px; }
+   824→   824→.user-list-info { display: flex; flex-direction: column; }
+   825→   825→.user-list-name { font-size: 14px; font-weight: 600; color: var(--text); }
+   826→   826→.user-list-meta { font-size: 11px; color: var(--text3); }
+   827→   827→
+   828→   828→/* ---- Enhanced Stats ---- */
+   829→   829→.stats-greeting { padding: 16px; background: linear-gradient(135deg, #eef2ff, #f5f3ff); border-radius: var(--r); margin-bottom: 16px; text-align: center; }
+   830→   830→.stats-greeting h4 { font-size: 16px; font-weight: 700; color: var(--pri); }
+   831→   831→.stats-greeting p { font-size: 13px; color: var(--text2); margin-top: 4px; }
+   832→   832→
+   833→   833→.stats-recommendation { padding: 12px; background: #fffbeb; border-radius: var(--rs); border-left: 3px solid var(--warn); margin-bottom: 14px; }
+   834→   834→.stats-recommendation h5 { font-size: 13px; font-weight: 700; color: #92400e; margin-bottom: 4px; }
+   835→   835→.stats-recommendation p { font-size: 12px; color: var(--text2); line-height: 1.5; }
+   836→   836→
+   837→   837→.weakness-heatmap { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+   838→   838→.weakness-chip { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; cursor: default; }
+   839→   839→.weakness-chip.severe { background: #fee2e2; color: #991b1b; }
+   840→   840→.weakness-chip.moderate { background: #fef3c7; color: #92400e; }
+   841→   841→.weakness-chip.mild { background: #e0e7ff; color: #3730a3; }
+   842→   842→.weakness-chip.ok { background: #dcfce7; color: #166534; }
+   843→   843→
+   844→   844→.streak-badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 12px; background: #fef3c7; border-radius: 20px; font-size: 12px; font-weight: 700; color: #92400e; }
+   845→   845→
+   846→   846→.improvement-rate { display: inline-flex; align-items: center; gap: 4px; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 700; }
+   847→   847→.improvement-rate.positive { background: #dcfce7; color: #166534; }
+   848→   848→.improvement-rate.negative { background: #fee2e2; color: #991b1b; }
+   849→   849→.improvement-rate.neutral { background: #f1f5f9; color: #64748b; }
+   850→   850→
+   851→   851→/* ---- Mode Selector ---- */
+   852→   852→.mode-selector {
+   853→   853→    display: flex;
+   854→   854→    align-items: center;
+   855→   855→    gap: 2px;
+   856→   856→    background: #f1f5f9;
+   857→   857→    border-radius: 20px;
+   858→   858→    padding: 2px;
+   859→   859→}
+   860→   860→.mode-btn {
+   861→   861→    padding: 5px 14px;
+   862→   862→    border: none;
+   863→   863→    border-radius: 18px;
+   864→   864→    background: transparent;
+   865→   865→    color: var(--text3);
+   866→   866→    font-size: 12px;
+   867→   867→    font-weight: 700;
+   868→   868→    cursor: pointer;
+   869→   869→    transition: all .2s;
+   870→   870→    white-space: nowrap;
+   871→   871→}
+   872→   872→.mode-btn:hover {
+   873→   873→    color: var(--pri);
+   874→   874→    background: #eef2ff;
+   875→   875→}
+   876→   876→.mode-btn.active {
+   877→   877→    background: var(--pri);
+   878→   878→    color: #fff;
+   879→   879→    box-shadow: 0 1px 4px rgba(79,70,229,0.3);
+   880→   880→}
+   881→   881→.mode-settings-btn {
+   882→   882→    padding: 4px !important;
+   883→   883→    border-radius: 50% !important;
+   884→   884→    color: var(--text3) !important;
+   885→   885→    transition: all .15s;
+   886→   886→}
+   887→   887→.mode-settings-btn:hover {
+   888→   888→    color: var(--pri) !important;
+   889→   889→    background: #eef2ff !important;
+   890→   890→}
+   891→   891→
+   892→   892→/* ---- Data Change Banner ---- */
+   893→   893→.data-change-banner {
+   894→   894→    position: fixed;
+   895→   895→    top: 60px;
+   896→   896→    left: 50%;
+   897→   897→    transform: translateX(-50%);
+   898→   898→    z-index: 150;
+   899→   899→    display: flex;
+   900→   900→    align-items: center;
+   901→   901→    gap: 8px;
+   902→   902→    padding: 10px 18px;
+   903→   903→    background: #fef3c7;
+   904→   904→    border: 1px solid #fbbf24;
+   905→   905→    border-radius: var(--r);
+   906→   906→    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+   907→   907→    color: #92400e;
+   908→   908→    font-size: 13px;
+   909→   909→    font-weight: 600;
+   910→   910→    animation: slideDown .3s ease-out;
+   911→   911→    max-width: 90%;
+   912→   912→}
+   913→   913→@keyframes slideDown {
+   914→   914→    from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+   915→   915→    to { opacity: 1; transform: translateX(-50%) translateY(0); }
+   916→   916→}
+   917→   917→.banner-close {
+   918→   918→    background: none;
+   919→   919→    border: none;
+   920→   920→    cursor: pointer;
+   921→   921→    color: #92400e;
+   922→   922→    font-size: 16px;
+   923→   923→    font-weight: 700;
+   924→   924→    padding: 0 4px;
+   925→   925→    opacity: 0.6;
+   926→   926→    transition: opacity .15s;
+   927→   927→}
+   928→   928→.banner-close:hover { opacity: 1; }
+   929→   929→
+   930→   930→/* ---- ID Range Dialog ---- */
+   931→   931→.id-range-info {
+   932→   932→    text-align: center;
+   933→   933→    padding: 8px 12px;
+   934→   934→    background: #f0fdf4;
+   935→   935→    border-radius: var(--rs);
+   936→   936→    font-size: 13px;
+   937→   937→    font-weight: 600;
+   938→   938→    color: #166534;
+   939→   939→    margin-bottom: 14px;
+   940→   940→}
+   941→   941→.id-range-error {
+   942→   942→    color: var(--err);
+   943→   943→    font-size: 13px;
+   944→   944→    text-align: center;
+   945→   945→    margin-top: 8px;
+   946→   946→    margin-bottom: 4px;
+   947→   947→}
+   948→   948→
+   949→   949→/* ---- Word Review Modal ---- */
+   950→   950→.word-review-modal {
+   951→   951→    max-width: 520px;
+   952→   952→}
+   953→   953→.word-review-progress {
+   954→   954→    text-align: center;
+   955→   955→    padding: 8px 16px;
+   956→   956→    background: #eef2ff;
+   957→   957→    border-radius: var(--rs);
+   958→   958→    font-size: 14px;
+   959→   959→    font-weight: 700;
+   960→   960→    color: var(--pri);
+   961→   961→    margin-bottom: 16px;
+   962→   962→}
+   963→   963→.word-review-empty {
+   964→   964→    text-align: center;
+   965→   965→    padding: 40px 20px;
+   966→   966→    font-size: 16px;
+   967→   967→    color: var(--text2);
+   968→   968→}
+   969→   969→.word-review-cards {
+   970→   970→    display: flex;
+   971→   971→    flex-direction: column;
+   972→   972→    gap: 12px;
+   973→   973→}
+   974→   974→.word-review-card {
+   975→   975→    padding: 20px;
+   976→   976→    background: #f8fafc;
+   977→   977→    border-radius: var(--r);
+   978→   978→    border: 1px solid var(--border);
+   979→   979→    transition: all .3s ease-out;
+   980→   980→    animation: fadeUp .35s ease-out;
+   981→   981→}
+   982→   982→.word-review-card.fading {
+   983→   983→    opacity: 0;
+   984→   984→    transform: translateY(-10px) scale(0.98);
+   985→   985→}
+   986→   986→.word-review-card-header {
+   987→   987→    display: flex;
+   988→   988→    align-items: baseline;
+   989→   989→    gap: 10px;
+   990→   990→    margin-bottom: 8px;
+   991→   991→}
+   992→   992→.word-review-card-word {
+   993→   993→    font-size: 22px;
+   994→   994→    font-weight: 800;
+   995→   995→    color: var(--text);
+   996→   996→}
+   997→   997→.word-review-card-pos {
+   998→   998→    font-size: 12px;
+   999→   999→    color: var(--pri);
+  1000→  1000→    font-weight: 600;
+  1001→  1001→}
+  1002→  1002→.word-review-card-ipa {
+  1003→  1003→    font-size: 15px;
+  1004→  1004→    color: var(--pri);
+  1005→  1005→    font-family: 'Courier New', 'Lucida Sans Unicode', monospace;
+  1006→  1006→    font-weight: 600;
+  1007→  1007→    margin-bottom: 6px;
+  1008→  1008→}
+  1009→  1009→.word-review-card-meaning {
+  1010→  1010→    font-size: 14px;
+  1011→  1011→    color: var(--text2);
+  1012→  1012→    margin-bottom: 10px;
+  1013→  1013→}
+  1014→  1014→.word-review-card-errors {
+  1015→  1015→    display: flex;
+  1016→  1016→    gap: 8px;
+  1017→  1017→    margin-bottom: 14px;
+  1018→  1018→}
+  1019→  1019→.word-review-error-badge {
+  1020→  1020→    display: inline-flex;
+  1021→  1021→    align-items: center;
+  1022→  1022→    gap: 4px;
+  1023→  1023→    padding: 3px 10px;
+  1024→  1024→    border-radius: 12px;
+  1025→  1025→    font-size: 11px;
+  1026→  1026→    font-weight: 700;
+  1027→  1027→}
+  1028→  1028→.word-review-error-badge.dictation {
+  1029→  1029→    background: #fef3c7;
+  1030→  1030→    color: #92400e;
+  1031→  1031→}
+  1032→  1032→.word-review-error-badge.pronunciation {
+  1033→  1033→    background: #fee2e2;
+  1034→  1034→    color: #991b1b;
+  1035→  1035→}
+  1036→  1036→.word-review-rating {
+  1037→  1037→    display: grid;
+  1038→  1038→    grid-template-columns: repeat(4, 1fr);
+  1039→  1039→    gap: 6px;
+  1040→  1040→}
+  1041→  1041→.word-review-rating-btn {
+  1042→  1042→    display: flex;
+  1043→  1043→    flex-direction: column;
+  1044→  1044→    align-items: center;
+  1045→  1045→    gap: 2px;
+  1046→  1046→    padding: 10px 4px;
+  1047→  1047→    border-radius: var(--rs);
+  1048→  1048→    border: 2px solid transparent;
+  1049→  1049→    cursor: pointer;
+  1050→  1050→    transition: all .2s;
+  1051→  1051→    text-align: center;
+  1052→  1052→    font-size: 12px;
+  1053→  1053→    font-weight: 700;
+  1054→  1054→}
+  1055→  1055→.word-review-rating-btn:hover {
+  1056→  1056→    transform: translateY(-2px);
+  1057→  1057→    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  1058→  1058→}
+  1059→  1059→.word-review-rating-btn:active {
+  1060→  1060→    transform: translateY(0);
+  1061→  1061→}
+  1062→  1062→.word-review-rating-btn.r1 {
+  1063→  1063→    border-color: #fecaca;
+  1064→  1064→    background: #fef2f2;
+  1065→  1065→    color: #991b1b;
+  1066→  1066→}
+  1067→  1067→.word-review-rating-btn.r1:hover { background: #fee2e2; border-color: #f87171; }
+  1068→  1068→.word-review-rating-btn.r2 {
+  1069→  1069→    border-color: #fed7aa;
+  1070→  1070→    background: #fff7ed;
+  1071→  1071→    color: #92400e;
+  1072→  1072→}
+  1073→  1073→.word-review-rating-btn.r2:hover { background: #ffedd5; border-color: #fb923c; }
+  1074→  1074→.word-review-rating-btn.r3 {
+  1075→  1075→    border-color: #bbf7d0;
+  1076→  1076→    background: #f0fdf4;
+  1077→  1077→    color: #166534;
+  1078→  1078→}
+  1079→  1079→.word-review-rating-btn.r3:hover { background: #dcfce7; border-color: #4ade80; }
+  1080→  1080→.word-review-rating-btn.r4 {
+  1081→  1081→    border-color: #bfdbfe;
+  1082→  1082→    background: #eff6ff;
+  1083→  1083→    color: #1e40af;
+  1084→  1084→}
+  1085→  1085→.word-review-rating-btn.r4:hover { background: #dbeafe; border-color: #60a5fa; }
+  1086→  1086→.word-review-rating-label {
+  1087→  1087→    font-size: 10px;
+  1088→  1088→    font-weight: 500;
+  1089→  1089→    opacity: 0.8;
+  1090→  1090→}
+  1091→  1091→.word-review-mastery-badge {
+  1092→  1092→    display: inline-flex;
+  1093→  1093→    align-items: center;
+  1094→  1094→    padding: 2px 8px;
+  1095→  1095→    border-radius: 10px;
+  1096→  1096→    font-size: 11px;
+  1097→  1097→    font-weight: 700;
+  1098→  1098→    margin-left: auto;
+  1099→  1099→}
+  1100→  1100→.word-review-fsrs-info {
+  1101→  1101→    margin-bottom: 12px;
+  1102→  1102→    padding: 10px;
+  1103→  1103→    background: rgba(255,255,255,0.6);
+  1104→  1104→    border-radius: var(--rs);
+  1105→  1105→}
+  1106→  1106→.word-review-progress-bar {
+  1107→  1107→    margin-bottom: 6px;
+  1108→  1108→}
+  1109→  1109→.word-review-progress-label {
+  1110→  1110→    display: flex;
+  1111→  1111→    justify-content: space-between;
+  1112→  1112→    font-size: 12px;
+  1113→  1113→    color: var(--text2);
+  1114→  1114→    margin-bottom: 4px;
+  1115→  1115→}
+  1116→  1116→.word-review-progress-track {
+  1117→  1117→    height: 6px;
+  1118→  1118→    background: #e2e8f0;
+  1119→  1119→    border-radius: 3px;
+  1120→  1120→    overflow: hidden;
+  1121→  1121→}
+  1122→  1122→.word-review-progress-fill {
+  1123→  1123→    height: 100%;
+  1124→  1124→    border-radius: 3px;
+  1125→  1125→    transition: width .3s ease-out;
+  1126→  1126→}
+  1127→  1127→.word-review-fsrs-details {
+  1128→  1128→    display: flex;
+  1129→  1129→    gap: 12px;
+  1130→  1130→    font-size: 11px;
+  1131→  1131→    color: var(--text3);
+  1132→  1132→}
+  1133→  1133→.word-review-stats-bar {
+  1134→  1134→    display: flex;
+  1135→  1135→    justify-content: center;
+  1136→  1136→    gap: 16px;
+  1137→  1137→    padding: 10px;
+  1138→  1138→    margin-top: 12px;
+  1139→  1139→    background: var(--bg);
+  1140→  1140→    border-radius: var(--rs);
+  1141→  1141→    font-size: 12px;
+  1142→  1142→    color: var(--text2);
+  1143→  1143→}
+  1144→  1144→.word-review-stat-item {
+  1145→  1145→    display: inline-flex;
+  1146→  1146→    align-items: center;
+  1147→  1147→    gap: 4px;
+  1148→  1148→}
+  1149→  1149→
+  1150→  1150→/* ============================================================
+  1151→  1151→   Word Practice Modal (跟读+听写)
+  1152→  1152→   ============================================================ */
+  1153→  1153→.word-practice-modal {
+  1154→  1154→    max-width: 520px;
+  1155→  1155→    max-height: 90vh;
+  1156→  1156→}
+  1157→  1157→.practice-tabs {
+  1158→  1158→    display: flex;
+  1159→  1159→    gap: 0;
+  1160→  1160→    background: var(--bg2);
+  1161→  1161→    border-radius: 10px;
+  1162→  1162→    padding: 3px;
+  1163→  1163→    margin-bottom: 14px;
+  1164→  1164→}
+  1165→  1165→.practice-tab {
+  1166→  1166→    flex: 1;
+  1167→  1167→    padding: 8px 12px;
+  1168→  1168→    border: none;
+  1169→  1169→    background: transparent;
+  1170→  1170→    border-radius: 8px;
+  1171→  1171→    font-size: 13px;
+  1172→  1172→    font-weight: 600;
+  1173→  1173→    color: var(--text3);
+  1174→  1174→    cursor: pointer;
+  1175→  1175→    transition: all 0.2s;
+  1176→  1176→}
+  1177→  1177→.practice-tab.active {
+  1178→  1178→    background: var(--pri);
+  1179→  1179→    color: #fff;
+  1180→  1180→    box-shadow: 0 2px 8px rgba(79,70,229,0.3);
+  1181→  1181→}
+  1182→  1182→.practice-progress {
+  1183→  1183→    text-align: center;
+  1184→  1184→    font-size: 13px;
+  1185→  1185→    color: var(--text3);
+  1186→  1186→    margin-bottom: 12px;
+  1187→  1187→    font-weight: 500;
+  1188→  1188→}
+  1189→  1189→.practice-card {
+  1190→  1190→    background: var(--card);
+  1191→  1191→    border-radius: 16px;
+  1192→  1192→    padding: 24px 20px;
+  1193→  1193→    text-align: center;
+  1194→  1194→    border: 1px solid var(--border);
+  1195→  1195→}
+  1196→  1196→.practice-word {
+  1197→  1197→    font-size: 36px;
+  1198→  1198→    font-weight: 800;
+  1199→  1199→    color: var(--text);
+  1200→  1200→    margin-bottom: 6px;
+  1201→  1201→}
+  1202→  1202→.practice-ipa {
+  1203→  1203→    font-size: 16px;
+  1204→  1204→    color: var(--text2);
+  1205→  1205→    margin-bottom: 10px;
+  1206→  1206→    font-family: 'Inter', monospace;
+  1207→  1207→}
+  1208→  1208→.practice-meaning {
+  1209→  1209→    font-size: 14px;
+  1210→  1210→    color: var(--text2);
+  1211→  1211→    margin-bottom: 16px;
+  1212→  1212→}
+  1213→  1213→.practice-badge {
+  1214→  1214→    display: inline-block;
+  1215→  1215→    padding: 3px 10px;
+  1216→  1216→    border-radius: 12px;
+  1217→  1217→    font-size: 11px;
+  1218→  1218→    font-weight: 600;
+  1219→  1219→    margin-bottom: 16px;
+  1220→  1220→}
+  1221→  1221→.practice-error-info {
+  1222→  1222→    display: flex;
+  1223→  1223→    gap: 8px;
+  1224→  1224→    justify-content: center;
+  1225→  1225→    margin-bottom: 14px;
+  1226→  1226→    flex-wrap: wrap;
+  1227→  1227→}
+  1228→  1228→.practice-error-badge {
+  1229→  1229→    padding: 3px 8px;
+  1230→  1230→    border-radius: 10px;
+  1231→  1231→    font-size: 11px;
+  1232→  1232→    font-weight: 600;
+  1233→  1233→}
+  1234→  1234→.practice-actions {
+  1235→  1235→    display: flex;
+  1236→  1236→    gap: 10px;
+  1237→  1237→    justify-content: center;
+  1238→  1238→    margin-top: 16px;
+  1239→  1239→}
+  1240→  1240→.btn-practice-record {
+  1241→  1241→    padding: 12px 28px;
+  1242→  1242→    border-radius: 24px;
+  1243→  1243→    background: var(--pri);
+  1244→  1244→    color: #fff;
+  1245→  1245→    border: none;
+  1246→  1246→    font-size: 14px;
+  1247→  1247→    font-weight: 600;
+  1248→  1248→    cursor: pointer;
+  1249→  1249→    display: flex;
+  1250→  1250→    align-items: center;
+  1251→  1251→    gap: 6px;
+  1252→  1252→    transition: all 0.2s;
+  1253→  1253→}
+  1254→  1254→.btn-practice-record:hover { opacity: 0.9; }
+  1255→  1255→.btn-practice-record.recording {
+  1256→  1256→    background: var(--err);
+  1257→  1257→    animation: pulse 1.5s infinite;
+  1258→  1258→}
+  1259→  1259→.btn-practice-play {
+  1260→  1260→    padding: 10px 20px;
+  1261→  1261→    border-radius: 24px;
+  1262→  1262→    background: var(--bg2);
+  1263→  1263→    color: var(--text);
+  1264→  1264→    border: 1px solid var(--border);
+  1265→  1265→    font-size: 13px;
+  1266→  1266→    font-weight: 500;
+  1267→  1267→    cursor: pointer;
+  1268→  1268→    display: flex;
+  1269→  1269→    align-items: center;
+  1270→  1270→    gap: 6px;
+  1271→  1271→}
+  1272→  1272→.practice-dictation-input {
+  1273→  1273→    width: 80%;
+  1274→  1274→    max-width: 300px;
+  1275→  1275→    padding: 12px 16px;
+  1276→  1276→    border: 2px solid var(--border);
+  1277→  1277→    border-radius: 12px;
+  1278→  1278→    font-size: 20px;
+  1279→  1279→    text-align: center;
+  1280→  1280→    font-weight: 600;
+  1281→  1281→    outline: none;
+  1282→  1282→    transition: border-color 0.2s;
+  1283→  1283→    margin: 12px auto;
+  1284→  1284→    display: block;
+  1285→  1285→}
+  1286→  1286→.practice-dictation-input:focus {
+  1287→  1287→    border-color: var(--pri);
+  1288→  1288→}
+  1289→  1289→.btn-practice-check {
+  1290→  1290→    padding: 10px 28px;
+  1291→  1291→    border-radius: 24px;
+  1292→  1292→    background: var(--pri);
+  1293→  1293→    color: #fff;
+  1294→  1294→    border: none;
+  1295→  1295→    font-size: 14px;
+  1296→  1296→    font-weight: 600;
+  1297→  1297→    cursor: pointer;
+  1298→  1298→}
+  1299→  1299→.practice-result {
+  1300→  1300→    margin-top: 16px;
+  1301→  1301→    padding: 12px;
+  1302→  1302→    border-radius: 12px;
+  1303→  1303→    text-align: center;
+  1304→  1304→}
+  1305→  1305→.practice-result.correct {
+  1306→  1306→    background: rgba(34,197,94,0.1);
+  1307→  1307→    color: var(--ok);
+  1308→  1308→}
+  1309→  1309→.practice-result.incorrect {
+  1310→  1310→    background: rgba(239,68,68,0.08);
+  1311→  1311→    color: var(--err);
+  1312→  1312→}
+  1313→  1313→.practice-result.partial-result {
+  1314→  1314→    background: rgba(230,126,34,0.08);
+  1315→  1315→    color: #e67e22;
+  1316→  1316→}
+  1317→  1317→.practice-score-ring {
+  1318→  1318→    width: 80px;
+  1319→  1319→    height: 80px;
+  1320→  1320→    margin: 0 auto 10px;
+  1321→  1321→    position: relative;
+  1322→  1322→}
+  1323→  1323→.practice-score-value {
+  1324→  1324→    font-size: 24px;
+  1325→  1325→    font-weight: 800;
+  1326→  1326→    position: absolute;
+  1327→  1327→    top: 50%;
+  1328→  1328→    left: 50%;
+  1329→  1329→    transform: translate(-50%, -50%);
+  1330→  1330→}
+  1331→  1331→.practice-fsrs-result {
+  1332→  1332→    margin-top: 10px;
+  1333→  1333→    padding: 8px 12px;
+  1334→  1334→    border-radius: 8px;
+  1335→  1335→    background: var(--bg2);
+  1336→  1336→    font-size: 12px;
+  1337→  1337→    color: var(--text2);
+  1338→  1338→}
+  1339→  1339→.practice-next-btn {
+  1340→  1340→    margin-top: 14px;
+  1341→  1341→    padding: 10px 24px;
+  1342→  1342→    border-radius: 24px;
+  1343→  1343→    background: var(--ok);
+  1344→  1344→    color: #fff;
+  1345→  1345→    border: none;
+  1346→  1346→    font-size: 14px;
+  1347→  1347→    font-weight: 600;
+  1348→  1348→    cursor: pointer;
+  1349→  1349→}
+  1350→  1350→/* Error Stats Tab */
+  1351→  1351→.error-stats-section {
+  1352→  1352→    margin-bottom: 16px;
+  1353→  1353→}
+  1354→  1354→.error-stats-title {
+  1355→  1355→    font-size: 14px;
+  1356→  1356→    font-weight: 700;
+  1357→  1357→    color: var(--text);
+  1358→  1358→    margin-bottom: 8px;
+  1359→  1359→    display: flex;
+  1360→  1360→    align-items: center;
+  1361→  1361→    gap: 6px;
+  1362→  1362→}
+  1363→  1363→.error-stats-list {
+  1364→  1364→    list-style: none;
+  1365→  1365→    padding: 0;
+  1366→  1366→    margin: 0;
+  1367→  1367→}
+  1368→  1368→.error-stats-item {
+  1369→  1369→    display: flex;
+  1370→  1370→    align-items: center;
+  1371→  1371→    justify-content: space-between;
+  1372→  1372→    padding: 8px 12px;
+  1373→  1373→    border-radius: 8px;
+  1374→  1374→    margin-bottom: 4px;
+  1375→  1375→    background: var(--bg2);
+  1376→  1376→    font-size: 13px;
+  1377→  1377→}
+  1378→  1378→.error-stats-word {
+  1379→  1379→    font-weight: 600;
+  1380→  1380→    color: var(--text);
+  1381→  1381→}
+  1382→  1382→.error-stats-count {
+  1383→  1383→    font-weight: 700;
+  1384→  1384→    font-size: 12px;
+  1385→  1385→}
+  1386→  1386→.error-stats-empty {
+  1387→  1387→    text-align: center;
+  1388→  1388→    padding: 20px;
+  1389→  1389→    color: var(--text3);
+  1390→  1390→    font-size: 13px;
+  1391→  1391→}
+  1392→  1392→
+  1393→  1393→@keyframes pulse {
+  1394→  1394→    0%, 100% { transform: scale(1); }
+  1395→  1395→    50% { transform: scale(1.05); }
+  1396→  1396→}
+  1397→  1397→
+  1398→  1398→/* ---- Responsive additions ---- */
+  1399→  1399→@media (max-width:480px) {
+  1400→  1400→    .mode-selector { gap: 1px; }
+  1401→  1401→    .mode-btn { padding: 4px 10px; font-size: 11px; }
+  1402→  1402→    .word-review-rating { grid-template-columns: repeat(2, 1fr); }
+  1403→  1403→    .data-change-banner { font-size: 12px; padding: 8px 12px; }
+  1404→  1404→    .practice-word { font-size: 28px; }
+  1405→  1405→    .practice-dictation-input { font-size: 18px; }
+  1406→  1406→}
+  1407→  1407→

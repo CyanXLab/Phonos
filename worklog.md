@@ -130,3 +130,53 @@ Stage Summary:
 - Bottom summary: 拼写 X | 漏写 Y | 多写 Z
 - Omission/addition don't affect score of other correctly-typed words
 - Commit: 090d77e pushed to origin/main
+
+---
+Task ID: 1
+Agent: Main Agent
+Task: FSRS-6 upgrade + metacognition + semantic network + frontend overhaul
+
+Work Log:
+- Researched official FSRS-6 algorithm from GitHub (open-spaced-repetition/py-fsrs)
+- Upgraded fsrs_db.py from FSRS-4.5 (18 params) to FSRS-6 (21 params)
+  - Learnable DECAY parameter (w[20])
+  - Exponential initial difficulty D0(G) = w[4] - exp(w[5]*(G-1)) + 1
+  - Short-term stability for same-day reviews
+  - Forget stability floor: min(s_recall, S/exp(w[17]*w[18]))
+  - Interval fuzzing to avoid clustering
+  - Auto-fitting every 30 reviews (simplified gradient descent, no PyTorch)
+  - Per-user parameter storage in user_fsrs_params table
+  - New methods: get_user_params, set_user_params, fit_params, get_scheduler, get_retrievability, get_next_interval_info
+- Created metacognition.py module
+  - 5 cognitive archetypes: 囫囵吞枣型/完美主义型/稳健进步型/高自信低准确型/焦虑型
+  - Prediction calibration: predicted vs actual scores
+  - Strategy recommendations per archetype
+  - Learning session quality + zombie learning detection
+- Created semantic_network.py module
+  - 30,505 word relations across 9,003 words
+  - 4 relation types: COOCCURRENCE, SEMANTIC_SIMILARITY, SYNTAGMATIC, PARADIGMATIC
+  - 25 semantic fields
+  - UCB1 exploration-exploitation tradeoff
+  - Cognitive-optimal learning path
+  - Field coverage tracking
+- Updated main.py with 21 new API endpoints (73 total)
+  - Metacognition: 6 endpoints
+  - Semantic network: 8 endpoints
+  - Settings: 6 endpoints
+  - Enhanced stats: 1 endpoint
+- Updated frontend (app.js, index.html, style.css)
+  - FSRS buttons aligned with official: Again/Hard/Good/Easy with Chinese subtitles
+  - Prediction calibration slider UI
+  - Cognitive mirror modal
+  - Semantic network viewer in word cards
+  - Comprehensive settings modal
+  - Enhanced stats dashboard
+  - Added CDN libraries: Animate.css, Chart.js, SortableJS
+- Updated README.md with full documentation
+
+Stage Summary:
+- All modules pass integration tests
+- 73 API endpoints total
+- FSRS-6 algorithm verified against official spec
+- Semantic network built from 100+ sentences + 50K dictionary
+- Frontend updated with all new UI components

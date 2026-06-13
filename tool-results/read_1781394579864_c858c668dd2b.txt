@@ -1,0 +1,602 @@
+   501→   501→        "fsrs_stats": fsrs_stats,
+   502→   502→        "word_review_stats": word_review_stats,
+   503→   503→        "weakness": weakness,
+   504→   504→    }
+   505→   505→
+   506→   506→
+   507→   507→@app.post("/api/learning/record-evaluation")
+   508→   508→async def learning_record_evaluation(data: dict, user: dict = Depends(get_current_user)):
+   509→   509→    learning = get_learning_algorithm()
+   510→   510→    try:
+   511→   511→        learning.record_evaluation(
+   512→   512→            user_id=user["id"],
+   513→   513→            sentence_id=data.get("sentence_id", ""),
+   514→   514→            overall_score=data.get("overall_score", 0),
+   515→   515→            pronunciation_score=data.get("pronunciation_score", 0),
+   516→   516→            completeness_score=data.get("completeness_score", 0),
+   517→   517→            fluency_score=data.get("fluency_score", 0),
+   518→   518→            errors=data.get("errors", []),
+   519→   519→            word_scores=data.get("word_scores", []),
+   520→   520→            duration=data.get("duration", 0),
+   521→   521→        )
+   522→   522→        return {"ok": True}
+   523→   523→    except Exception as e:
+   524→   524→        raise HTTPException(status_code=500, detail=str(e))
+   525→   525→
+   526→   526→
+   527→   527→@app.get("/api/sentence")
+   528→   528→async def get_random_sentence(force_new: bool = Query(False, description="强制获取新句子，跳过FSRS"), user: dict = Depends(get_current_user)):
+   529→   529→    """获取练习句子（FSRS 优先，混合复习和新句子）"""
+   530→   530→    user_id = user.get("id", "default")
+   531→   531→
+   532→   532→    if force_new:
+   533→   533→        sentence = random.choice(PRESET_SENTENCES)
+   534→   534→        result = await _enrich_sentence_async(sentence)
+   535→   535→        _auto_register_words(sentence["text"], user_id)
+   536→   536→        return result
+   537→   537→
+   538→   538→    try:
+   539→   539→        fsrs = get_fsrs_db()
+   540→   540→        queue = fsrs.get_review_queue(card_type="sentence", user_id=user_id, new_per_day=5)
+   541→   541→
+   542→   542→        if queue:
+   543→   543→            review_cards = [q for q in queue if q["type"] == "review"]
+   544→   544→            new_cards = [q for q in queue if q["type"] == "new"]
+   545→   545→
+   546→   546→            if review_cards:
+   547→   547→                chosen = random.choice(review_cards)
+   548→   548→                sentence = _find_sentence_by_card_id(chosen["card_id"])
+   549→   549→                if sentence:
+   550→   550→                    result = await _enrich_sentence_async(sentence)
+   551→   551→                    result["fsrs"] = chosen
+   552→   552→                    _auto_register_words(sentence["text"], user_id)
+   553→   553→                    return result
+   554→   554→
+   555→   555→            if new_cards:
+   556→   556→                chosen = random.choice(new_cards)
+   557→   557→                sentence = _find_sentence_by_card_id(chosen["card_id"])
+   558→   558→                if sentence:
+   559→   559→                    result = await _enrich_sentence_async(sentence)
+   560→   560→                    result["fsrs"] = chosen
+   561→   561→                    _auto_register_words(sentence["text"], user_id)
+   562→   562→                    return result
+   563→   563→
+   564→   564→        # 没有队列，选一个句子
+   565→   565→        fsrs_card_ids = set()
+   566→   566→        try:
+   567→   567→            import sqlite3
+   568→   568→            conn = sqlite3.connect(fsrs.db_path)
+   569→   569→            rows = conn.execute("SELECT card_id FROM cards WHERE card_type='sentence' AND user_id=?", (user_id,)).fetchall()
+   570→   570→            fsrs_card_ids = {r[0] for r in rows}
+   571→   571→            conn.close()
+   572→   572→        except Exception:
+   573→   573→            pass
+   574→   574→
+   575→   575→        unregistered = [
+   576→   576→            s for s in PRESET_SENTENCES
+   577→   577→            if f"sentence_{s['id']}" not in fsrs_card_ids
+   578→   578→        ]
+   579→   579→        if unregistered:
+   580→   580→            sentence = random.choice(unregistered)
+   581→   581→            fsrs.ensure_card(f"sentence_{sentence['id']}", card_type="sentence", user_id=user_id)
+   582→   582→            result = await _enrich_sentence_async(sentence)
+   583→   583→            _auto_register_words(sentence["text"], user_id)
+   584→   584→            return result
+   585→   585→
+   586→   586→    except Exception as e:
+   587→   587→        print(f"[FSRS] 获取复习队列失败，回退到随机模式: {e}")
+   588→   588→
+   589→   589→    sentence = random.choice(PRESET_SENTENCES)
+   590→   590→    result = await _enrich_sentence_async(sentence)
+   591→   591→    _auto_register_words(sentence["text"], user_id)
+   592→   592→    return result
+   593→   593→
+   594→   594→
+   595→   595→@app.get("/api/sentences")
+   596→   596→async def get_all_sentences():
+   597→   597→    """获取所有练习句子（流式：只返回基本信息，不展开词典详情）"""
+   598→   598→    return [
+   599→   599→        {
+   600→   600→            "id": s["id"],
+   601→   601→            "text": s["text"],
+   602→   602→            "translation": s.get("translation", ""),
+   603→   603→            "difficulty": s.get("difficulty", "medium"),
+   604→   604→            "category": s.get("category", "general"),
+   605→   605→        }
+   606→   606→        for s in PRESET_SENTENCES
+   607→   607→    ]
+   608→   608→
+   609→   609→
+   610→   610→@app.get("/api/sentence/{sentence_id}")
+   611→   611→async def get_sentence_by_id(sentence_id: int):
+   612→   612→    """按ID获取句子（完整详情）"""
+   613→   613→    for s in PRESET_SENTENCES:
+   614→   614→        if s["id"] == sentence_id:
+   615→   615→            return await _enrich_sentence_async(s)
+   616→   616→    raise HTTPException(status_code=404, detail="句子不存在")
+   617→   617→
+   618→   618→
+   619→   619→@app.get("/api/minimal-pairs")
+   620→   620→async def get_minimal_pairs():
+   621→   621→    """获取最小对立对数据"""
+   622→   622→    return MINIMAL_PAIRS
+   623→   623→
+   624→   624→
+   625→   625→@app.get("/api/phoneme-tips")
+   626→   626→async def get_phoneme_tips():
+   627→   627→    """获取全部44个音素的发音指南"""
+   628→   628→    result = {}
+   629→   629→    for phoneme, info in PHONEME_TIPS.items():
+   630→   630→        result[phoneme] = {
+   631→   631→            "description": info["description"],
+   632→   632→            "ipa": info.get("ipa", ARPABET_TO_IPA.get(phoneme, "")),
+   633→   633→            "common_error": info["common_error"],
+   634→   634→            "solution": info["solution"],
+   635→   635→            "mouth_shape": info["mouth_shape"],
+   636→   636→            "practice_words": info.get("practice_words", []),
+   637→   637→        }
+   638→   638→    return result
+   639→   639→
+   640→   640→
+   641→   641→# ============================================================
+   642→   642→# FSRS 间隔重复 API
+   643→   643→# ============================================================
+   644→   644→
+   645→   645→@app.post("/api/fsrs/review")
+   646→   646→async def fsrs_review(data: dict, user: dict = Depends(get_current_user)):
+   647→   647→    card_id = data.get("card_id")
+   648→   648→    rating = data.get("rating")
+   649→   649→    card_type = data.get("card_type", "sentence")
+   650→   650→    user_id = user.get("id", "default")
+   651→   651→
+   652→   652→    if not card_id:
+   653→   653→        raise HTTPException(status_code=400, detail="缺少 card_id")
+   654→   654→    if rating not in (1, 2, 3, 4):
+   655→   655→        raise HTTPException(status_code=400, detail="rating 必须为 1-4")
+   656→   656→
+   657→   657→    try:
+   658→   658→        fsrs = get_fsrs_db()
+   659→   659→        result = fsrs.review_card(card_id, rating, card_type, user_id=user_id)
+   660→   660→        return result
+   661→   661→    except Exception as e:
+   662→   662→        raise HTTPException(status_code=500, detail=f"复习记录失败: {str(e)}")
+   663→   663→
+   664→   664→
+   665→   665→@app.get("/api/fsrs/queue")
+   666→   666→async def fsrs_queue(card_type: str = Query("sentence"), new_per_day: int = Query(5), user: dict = Depends(get_current_user)):
+   667→   667→    user_id = user.get("id", "default")
+   668→   668→    try:
+   669→   669→        fsrs = get_fsrs_db()
+   670→   670→        queue = fsrs.get_review_queue(card_type=card_type, user_id=user_id, new_per_day=new_per_day)
+   671→   671→        return {"queue": queue, "total": len(queue)}
+   672→   672→    except Exception as e:
+   673→   673→        raise HTTPException(status_code=500, detail=f"获取复习队列失败: {str(e)}")
+   674→   674→
+   675→   675→
+   676→   676→@app.get("/api/fsrs/stats")
+   677→   677→async def fsrs_stats(user: dict = Depends(get_current_user)):
+   678→   678→    user_id = user.get("id", "default")
+   679→   679→    try:
+   680→   680→        fsrs = get_fsrs_db()
+   681→   681→        fsrs_stats_data = fsrs.get_stats(user_id=user_id)
+   682→   682→        # Also include learning analytics if available
+   683→   683→        try:
+   684→   684→            learning = get_learning_algorithm()
+   685→   685→            analytics = learning.get_analytics(user_id)
+   686→   686→            fsrs_stats_data["learning_analytics"] = analytics
+   687→   687→        except Exception:
+   688→   688→            pass
+   689→   689→        return fsrs_stats_data
+   690→   690→    except Exception as e:
+   691→   691→        raise HTTPException(status_code=500, detail=f"获取统计失败: {str(e)}")
+   692→   692→
+   693→   693→
+   694→   694→@app.get("/api/fsrs/next")
+   695→   695→async def fsrs_next(card_type: str = Query("sentence"), user: dict = Depends(get_current_user)):
+   696→   696→    user_id = user.get("id", "default")
+   697→   697→    try:
+   698→   698→        fsrs = get_fsrs_db()
+   699→   699→        queue = fsrs.get_review_queue(card_type=card_type, user_id=user_id, new_per_day=5)
+   700→   700→
+   701→   701→        if queue:
+   702→   702→            review_cards = [q for q in queue if q["type"] == "review"]
+   703→   703→            new_cards = [q for q in queue if q["type"] == "new"]
+   704→   704→
+   705→   705→            chosen = None
+   706→   706→            sentence_type = "new"
+   707→   707→            if review_cards:
+   708→   708→                chosen = random.choice(review_cards)
+   709→   709→                sentence_type = "review"
+   710→   710→            elif new_cards:
+   711→   711→                chosen = random.choice(new_cards)
+   712→   712→
+   713→   713→            if chosen:
+   714→   714→                sentence = _find_sentence_by_card_id(chosen["card_id"])
+   715→   715→                if sentence:
+   716→   716→                    result = await _enrich_sentence_async(sentence)
+   717→   717→                    result["fsrs"] = chosen
+   718→   718→                    return {"sentence": result, "type": sentence_type}
+   719→   719→
+   720→   720→        sentence = random.choice(PRESET_SENTENCES)
+   721→   721→        result = await _enrich_sentence_async(sentence)
+   722→   722→        return {"sentence": result, "type": "new"}
+   723→   723→
+   724→   724→    except Exception:
+   725→   725→        sentence = random.choice(PRESET_SENTENCES)
+   726→   726→        result = await _enrich_sentence_async(sentence)
+   727→   727→        return {"sentence": result, "type": "new"}
+   728→   728→
+   729→   729→
+   730→   730→@app.get("/api/fsrs/due-count")
+   731→   731→async def fsrs_due_count(card_type: str = Query("sentence"), user: dict = Depends(get_current_user)):
+   732→   732→    """获取到期复习数量
+   733→   733→    
+   734→   734→    返回多种计数：
+   735→   735→    - count: 严格FSRS到期数（state!=NEW 且 due<=now）
+   736→   736→    - pending_count: 待复习数（非NEW且非已掌握，不含新词）
+   737→   737→    - total_reviewable: 可练习总数（新词+待复习，不含已掌握）
+   738→   738→    - new_count: 新卡片数
+   739→   739→    """
+   740→   740→    user_id = user.get("id", "default")
+   741→   741→    try:
+   742→   742→        fsrs = get_fsrs_db()
+   743→   743→        due_count = fsrs.get_due_count(card_type=card_type, user_id=user_id)
+   744→   744→        new_count = fsrs.get_new_card_count(card_type=card_type, user_id=user_id)
+   745→   745→        pending_count = fsrs.get_pending_review_count(card_type=card_type, user_id=user_id)
+   746→   746→        total_reviewable = fsrs.get_total_reviewable_count(card_type=card_type, user_id=user_id)
+   747→   747→        return {
+   748→   748→            "count": due_count, 
+   749→   749→            "new_count": new_count, 
+   750→   750→            "total_due": due_count, 
+   751→   751→            "pending_count": pending_count,
+   752→   752→            "total_reviewable": total_reviewable,
+   753→   753→        }
+   754→   754→    except Exception:
+   755→   755→        return {"count": 0, "new_count": 0, "total_due": 0, "pending_count": 0, "total_reviewable": 0}
+   756→   756→
+   757→   757→
+   758→   758→@app.post("/api/fsrs/ensure")
+   759→   759→async def fsrs_ensure(data: dict, user: dict = Depends(get_current_user)):
+   760→   760→    card_ids = data.get("card_ids", [])
+   761→   761→    card_type = data.get("card_type", "sentence")
+   762→   762→    user_id = user.get("id", "default")
+   763→   763→
+   764→   764→    if not card_ids:
+   765→   765→        raise HTTPException(status_code=400, detail="缺少 card_ids")
+   766→   766→
+   767→   767→    try:
+   768→   768→        fsrs = get_fsrs_db()
+   769→   769→        created = []
+   770→   770→        for card_id in card_ids:
+   771→   771→            fsrs.ensure_card(card_id, card_type, user_id=user_id)
+   772→   772→            created.append(card_id)
+   773→   773→        return {"created": created, "total": len(created)}
+   774→   774→    except Exception as e:
+   775→   775→        raise HTTPException(status_code=500, detail=f"创建卡片失败: {str(e)}")
+   776→   776→
+   777→   777→
+   778→   778→# ============================================================
+   779→   779→# 学习模式 API
+   780→   780→# ============================================================
+   781→   781→
+   782→   782→@app.get("/api/mode/sequential/next")
+   783→   783→async def mode_sequential_next(
+   784→   784→    start_id: Optional[int] = Query(None, description="起始句子ID（1-indexed，句子的id字段）"),
+   785→   785→    end_id: Optional[int] = Query(None, description="结束句子ID"),
+   786→   786→    user: dict = Depends(get_current_user),
+   787→   787→):
+   788→   788→    """顺序模式：严格按JSON文件ID顺序获取下一个句子
+   789→   789→    
+   790→   790→    顺序模式不因 FSRS 到期复习打断，FSRS 只在后台记录进度。
+   791→   791→    当用户主动评级时，FSRS 会在智能模式中发挥作用。
+   792→   792→    支持通过 start_id/end_id 指定ID范围。
+   793→   793→    """
+   794→   794→    user_id = user.get("id", "default")
+   795→   795→    learning = get_learning_algorithm()
+   796→   796→    fsrs = get_fsrs_db()
+   797→   797→    current_count = len(PRESET_SENTENCES)
+   798→   798→
+   799→   799→    # 0. 数据变化检测
+   800→   800→    pos_info = learning.get_sequential_position(user_id)
+   801→   801→    stored_count = pos_info.get("sentences_count", 0)
+   802→   802→    data_changed = False
+   803→   803→    if stored_count > 0 and stored_count != current_count:
+   804→   804→        data_changed = True
+   805→   805→
+   806→   806→    # 1. 确定有效的 start_id / end_id
+   807→   807→    effective_start = start_id if start_id is not None else pos_info.get("start_id")
+   808→   808→    effective_end = end_id if end_id is not None else pos_info.get("end_id")
+   809→   809→
+   810→   810→    # 2. 顺序获取下一个句子（严格按顺序，不被 FSRS 打断）
+   811→   811→    if effective_start is not None or effective_end is not None:
+   812→   812→        # 使用 ID 范围过滤
+   813→   813→        filtered = [s for s in PRESET_SENTENCES]
+   814→   814→        if effective_start is not None:
+   815→   815→            filtered = [s for s in filtered if s.get("id", 0) >= effective_start]
+   816→   816→        if effective_end is not None:
+   817→   817→            filtered = [s for s in filtered if s.get("id", 0) <= effective_end]
+   818→   818→
+   819→   819→        if not filtered:
+   820→   820→            raise HTTPException(status_code=404, detail="指定ID范围内没有句子")
+   821→   821→
+   822→   822→        # 用存储的位置在过滤后的列表中找句子
+   823→   823→        pos = pos_info.get("position", 0)
+   824→   824→        
+   825→   825→        # 如果数据变化了，不自动前进，返回提示
+   826→   826→        if data_changed:
+   827→   827→            sentence = filtered[0]
+   828→   828→            result = await _enrich_sentence_async(sentence)
+   829→   829→            return {
+   830→   830→                "sentence": result,
+   831→   831→                "type": "new",
+   832→   832→                "mode": "sequential",
+   833→   833→                "data_changed": True,
+   834→   834→                "position": 0,
+   835→   835→                "total": len(filtered),
+   836→   836→                "message": "句子数据已变更，请确认起始位置",
+   837→   837→            }
+   838→   838→
+   839→   839→        # 在过滤列表中找到当前应该的句子
+   840→   840→        if pos < len(filtered):
+   841→   841→            sentence = filtered[pos]
+   842→   842→        else:
+   843→   843→            pos = 0
+   844→   844→            sentence = filtered[0]
+   845→   845→
+   846→   846→        # 更新位置（在过滤列表中的位置+1）
+   847→   847→        next_pos = pos + 1
+   848→   848→        if next_pos >= len(filtered):
+   849→   849→            next_pos = 0  # 循环
+   850→   850→        learning.set_sequential_position(
+   851→   851→            user_id, next_pos, sentences_count=current_count,
+   852→   852→            start_id=effective_start, end_id=effective_end
+   853→   853→        )
+   854→   854→
+   855→   855→        # 确保 FSRS 卡片存在
+   856→   856→        fsrs.ensure_card(f"sentence_{sentence['id']}", card_type="sentence", user_id=user_id)
+   857→   857→
+   858→   858→        # 获取 FSRS 卡片信息（如果有）
+   859→   859→        card_info = fsrs.get_card_info(f"sentence_{sentence['id']}", user_id)
+   860→   860→
+   861→   861→        result = await _enrich_sentence_async(sentence)
+   862→   862→        if card_info:
+   863→   863→            result["fsrs"] = card_info
+   864→   864→        _auto_register_words(sentence["text"], user_id)
+   865→   865→        return {
+   866→   866→            "sentence": result,
+   867→   867→            "type": "new",
+   868→   868→            "mode": "sequential",
+   869→   869→            "position": pos,
+   870→   870→            "total": len(filtered),
+   871→   871→            "data_changed": False,
+   872→   872→            "start_id": effective_start,
+   873→   873→            "end_id": effective_end,
+   874→   874→        }
+   875→   875→    else:
+   876→   876→        # 原有逻辑：使用列表位置
+   877→   877→        pos = pos_info.get("position", 0)
+   878→   878→
+   879→   879→        # 如果数据变化了，不自动前进
+   880→   880→        if data_changed:
+   881→   881→            if pos >= current_count:
+   882→   882→                pos = 0
+   883→   883→            sentence = PRESET_SENTENCES[pos]
+   884→   884→            result = await _enrich_sentence_async(sentence)
+   885→   885→            _auto_register_words(sentence["text"], user_id)
+   886→   886→            return {
+   887→   887→                "sentence": result,
+   888→   888→                "type": "new",
+   889→   889→                "mode": "sequential",
+   890→   890→                "data_changed": True,
+   891→   891→                "position": pos,
+   892→   892→                "total": current_count,
+   893→   893→                "message": "句子数据已变更，请确认起始位置",
+   894→   894→            }
+   895→   895→
+   896→   896→        if pos >= current_count:
+   897→   897→            pos = 0  # 循环
+   898→   898→
+   899→   899→        sentence = PRESET_SENTENCES[pos]
+   900→   900→        next_pos = pos + 1
+   901→   901→        learning.set_sequential_position(user_id, next_pos, sentences_count=current_count)
+   902→   902→
+   903→   903→        # 确保 FSRS 卡片存在
+   904→   904→        fsrs.ensure_card(f"sentence_{sentence['id']}", card_type="sentence", user_id=user_id)
+   905→   905→
+   906→   906→        # 获取 FSRS 卡片信息
+   907→   907→        card_info = fsrs.get_card_info(f"sentence_{sentence['id']}", user_id)
+   908→   908→
+   909→   909→        result = await _enrich_sentence_async(sentence)
+   910→   910→        if card_info:
+   911→   911→            result["fsrs"] = card_info
+   912→   912→        _auto_register_words(sentence["text"], user_id)
+   913→   913→        return {
+   914→   914→            "sentence": result,
+   915→   915→            "type": "new",
+   916→   916→            "mode": "sequential",
+   917→   917→            "position": pos,
+   918→   918→            "total": current_count,
+   919→   919→            "data_changed": False,
+   920→   920→        }
+   921→   921→
+   922→   922→
+   923→   923→@app.post("/api/mode/sequential/set-range")
+   924→   924→async def mode_sequential_set_range(data: dict, user: dict = Depends(get_current_user)):
+   925→   925→    """设置顺序模式的ID范围（或从某个ID开始）
+   926→   926→
+   927→   927→    请求体：
+   928→   928→    - start_id: 起始句子ID（1-indexed，句子的id字段），必填
+   929→   929→    - end_id: 结束句子ID，可选（默认到最后一个句子）
+   930→   930→    """
+   931→   931→    user_id = user.get("id", "default")
+   932→   932→    start_id = data.get("start_id")
+   933→   933→    end_id = data.get("end_id")
+   934→   934→
+   935→   935→    if start_id is None:
+   936→   936→        raise HTTPException(status_code=400, detail="缺少 start_id")
+   937→   937→
+   938→   938→    learning = get_learning_algorithm()
+   939→   939→    result = learning.set_sequential_range(user_id, start_id, end_id, PRESET_SENTENCES)
+   940→   940→
+   941→   941→    # 确保 FSRS 卡片存在
+   942→   942→    fsrs = get_fsrs_db()
+   943→   943→    start_sentence = None
+   944→   944→    for s in PRESET_SENTENCES:
+   945→   945→        if s.get("id") == start_id:
+   946→   946→            start_sentence = s
+   947→   947→            break
+   948→   948→
+   949→   949→    if start_sentence:
+   950→   950→        fsrs.ensure_card(f"sentence_{start_sentence['id']}", card_type="sentence", user_id=user_id)
+   951→   951→
+   952→   952→    return {
+   953→   953→        "ok": True,
+   954→   954→        "position": result["position"],
+   955→   955→        "start_id": result["start_id"],
+   956→   956→        "end_id": result["end_id"],
+   957→   957→        "sentences_count": result["sentences_count"],
+   958→   958→        "message": f"顺序模式已设置为从ID {start_id}开始" + (f" 到ID {end_id}" if end_id else ""),
+   959→   959→    }
+   960→   960→
+   961→   961→
+   962→   962→@app.get("/api/mode/smart/next")
+   963→   963→async def mode_smart_next(user: dict = Depends(get_current_user)):
+   964→   964→    """智能模式：基于薄弱分析和FSRS复习历史推荐句子（增强版）"""
+   965→   965→    user_id = user.get("id", "default")
+   966→   966→    learning = get_learning_algorithm()
+   967→   967→    fsrs = get_fsrs_db()
+   968→   968→
+   969→   969→    # 1. 优先复习到期卡片（使用评分函数排序）
+   970→   970→    due_cards = fsrs.get_due_cards(card_type="sentence", user_id=user_id, limit=20)
+   971→   971→    if due_cards:
+   972→   972→        # Score each due card's sentence using the smart recommendation score
+   973→   973→        scored_cards = []
+   974→   974→        for card in due_cards:
+   975→   975→            sentence = _find_sentence_by_card_id(card["card_id"])
+   976→   976→            if sentence:
+   977→   977→                score = learning.get_smart_recommendation_score(user_id, sentence, PRESET_SENTENCES)
+   978→   978→                scored_cards.append((score, card, sentence))
+   979→   979→
+   980→   980→        if scored_cards:
+   981→   981→            # Sort by score descending - pick the highest-scored sentence
+   982→   982→            scored_cards.sort(key=lambda x: -x[0])
+   983→   983→            # Pick from top 3 with some randomness for variety
+   984→   984→            top_n = min(3, len(scored_cards))
+   985→   985→            chosen_idx = random.randint(0, top_n - 1)
+   986→   986→            chosen_score, chosen_card, chosen_sentence = scored_cards[chosen_idx]
+   987→   987→            result = await _enrich_sentence_async(chosen_sentence)
+   988→   988→            result["fsrs"] = chosen_card
+   989→   989→            result["smart_score"] = round(chosen_score, 2)
+   990→   990→            _auto_register_words(chosen_sentence["text"], user_id)
+   991→   991→            return {"sentence": result, "type": "review", "mode": "smart"}
+   992→   992→
+   993→   993→    # 2. 自适应推荐新句子（使用评分函数排序候选句子）
+   994→   994→    weakness = learning.get_weakness_profile(user_id)
+   995→   995→    difficulty = weakness.get("difficulty_level", "medium")
+   996→   996→
+   997→   997→    # Filter sentences by difficulty
+   998→   998→    difficulty_map = {"easy": ["easy"], "medium": ["easy", "medium"], "hard": ["medium", "hard"]}
+   999→   999→    target_diffs = difficulty_map.get(difficulty, ["medium"])
+  1000→  1000→    matching = [s for s in PRESET_SENTENCES if s.get("difficulty", "medium") in target_diffs]
+  1001→  1001→    if not matching:
+  1002→  1002→        matching = PRESET_SENTENCES
+  1003→  1003→
+  1004→  1004→    # Score all matching sentences and pick the best
+  1005→  1005→    scored_sentences = []
+  1006→  1006→    for s in matching:
+  1007→  1007→        score = learning.get_smart_recommendation_score(user_id, s, PRESET_SENTENCES)
+  1008→  1008→        scored_sentences.append((score, s))
+  1009→  1009→
+  1010→  1010→    if scored_sentences:
+  1011→  1011→        scored_sentences.sort(key=lambda x: -x[0])
+  1012→  1012→        # Pick from top 5 with some randomness
+  1013→  1013→        top_n = min(5, len(scored_sentences))
+  1014→  1014→        chosen_idx = random.randint(0, top_n - 1)
+  1015→  1015→        chosen_score, chosen_sentence = scored_sentences[chosen_idx]
+  1016→  1016→        fsrs.ensure_card(f"sentence_{chosen_sentence['id']}", card_type="sentence", user_id=user_id)
+  1017→  1017→        enriched = await _enrich_sentence_async(chosen_sentence)
+  1018→  1018→        enriched["smart_score"] = round(chosen_score, 2)
+  1019→  1019→        _auto_register_words(chosen_sentence["text"], user_id)
+  1020→  1020→        return {"sentence": enriched, "type": "new", "mode": "smart"}
+  1021→  1021→
+  1022→  1022→    # 3. Fallback
+  1023→  1023→    sentence = random.choice(PRESET_SENTENCES)
+  1024→  1024→    enriched = await _enrich_sentence_async(sentence)
+  1025→  1025→    _auto_register_words(sentence["text"], user_id)
+  1026→  1026→    return {"sentence": enriched, "type": "new", "mode": "smart"}
+  1027→  1027→
+  1028→  1028→
+  1029→  1029→@app.get("/api/mode/status")
+  1030→  1030→async def mode_status(user: dict = Depends(get_current_user)):
+  1031→  1031→    """获取当前学习模式状态（增强版：包含数据变更检测和智能模式信息）"""
+  1032→  1032→    user_id = user.get("id", "default")
+  1033→  1033→    learning = get_learning_algorithm()
+  1034→  1034→    fsrs = get_fsrs_db()
+  1035→  1035→    current_count = len(PRESET_SENTENCES)
+  1036→  1036→
+  1037→  1037→    pos_info = learning.get_sequential_position(user_id)
+  1038→  1038→    pos = pos_info.get("position", 0)
+  1039→  1039→    stored_count = pos_info.get("sentences_count", 0)
+  1040→  1040→    start_id = pos_info.get("start_id")
+  1041→  1041→    end_id = pos_info.get("end_id")
+  1042→  1042→    data_changed = stored_count > 0 and stored_count != current_count
+  1043→  1043→
+  1044→  1044→    due_count = len(fsrs.get_due_cards(card_type="sentence", user_id=user_id))
+  1045→  1045→    error_words = learning.get_error_words(user_id)
+  1046→  1046→    word_due = len(fsrs.get_due_cards(card_type="word", user_id=user_id))
+  1047→  1047→
+  1048→  1048→    # Smart mode info
+  1049→  1049→    weakness = learning.get_weakness_profile(user_id)
+  1050→  1050→    smart_mode_info = {
+  1051→  1051→        "difficulty_level": weakness.get("difficulty_level", "medium"),
+  1052→  1052→        "phoneme_weakness_count": len(weakness.get("phoneme_weaknesses", [])),
+  1053→  1053→        "word_weakness_count": len(weakness.get("word_weaknesses", [])),
+  1054→  1054→        "error_word_count": len(error_words),
+  1055→  1055→    }
+  1056→  1056→
+  1057→  1057→    return {
+  1058→  1058→        "sequential_position": pos,
+  1059→  1059→        "sequential_total": current_count,
+  1060→  1060→        "due_reviews": due_count,
+  1061→  1061→        "error_word_count": len(error_words),
+  1062→  1062→        "word_due_count": word_due,
+  1063→  1063→        "sentences_count": current_count,
+  1064→  1064→        "stored_sentences_count": stored_count,
+  1065→  1065→        "data_changed": data_changed,
+  1066→  1066→        "start_id": start_id,
+  1067→  1067→        "end_id": end_id,
+  1068→  1068→        "smart_mode_info": smart_mode_info,
+  1069→  1069→    }
+  1070→  1070→
+  1071→  1071→
+  1072→  1072→# ============================================================
+  1073→  1073→# 单词复习 API（FSRS 逐个推荐）
+  1074→  1074→# ============================================================
+  1075→  1075→
+  1076→  1076→@app.get("/api/words/review-queue")
+  1077→  1077→async def words_review_queue(limit: int = Query(20, description="每次复习单词数量"), user: dict = Depends(get_current_user)):
+  1078→  1078→    """获取单词复习队列（FSRS 逐个推荐 + 错误单词补充）
+  1079→  1079→    
+  1080→  1080→    策略：
+  1081→  1081→    1. FSRS 到期复习单词优先
+  1082→  1082→    2. 新单词（错误单词）补充
+  1083→  1083→    3. 每次最多 limit 个（默认20）
+  1084→  1084→    4. 每个单词包含 FSRS 状态、掌握度、错误次数等信息
+  1085→  1085→    """
+  1086→  1086→    user_id = user.get("id", "default")
+  1087→  1087→    learning = get_learning_algorithm()
+  1088→  1088→    fsrs = get_fsrs_db()
+  1089→  1089→    dict_svc = get_dict_service()
+  1090→  1090→
+  1091→  1091→    now = time.time()
+  1092→  1092→    seen = set()
+  1093→  1093→    queue = []
+  1094→  1094→
+  1095→  1095→    # 1. FSRS 到期的复习单词
+  1096→  1096→    due_word_cards = fsrs.get_due_cards(card_type="word", user_id=user_id, limit=limit)
+  1097→  1097→    for card in due_word_cards:
+  1098→  1098→        word = card["card_id"].replace("word_", "", 1)
+  1099→  1099→        if word not in seen:
+  1100→  1100→            seen.add(word)
+
+[showing lines 501-1100 of 2002; use offset=1101 with limit to continue reading]

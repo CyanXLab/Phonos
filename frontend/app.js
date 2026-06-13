@@ -76,6 +76,11 @@ const S = {
     wordReviewQueue: [],         // Word review queue items
     wordReviewIndex: 0,          // Current index in review queue
     wordReviewTotal: 0,          // Total items in review queue
+    // --- Prediction calibration state ---
+    predictionScore: null,       // User's prediction score (0-100)
+    calibrationEnabled: false,   // Auto-detected from /api/metacognition/profile
+    // --- Settings state ---
+    settings: null,              // Cached settings from /api/settings
 };
 
 // 统计数据全部存储在服务端数据库中，跨浏览器自动同步
@@ -313,6 +318,24 @@ const el = {
     wordReviewCards: $('wordReviewCards'),
     btnWordReview: $('btnWordReview'),
     btnWordPractice: $('btnWordPractice'),
+    // New UI elements
+    btnCognitiveMirror: $('btnCognitiveMirror'),
+    btnSettings: $('btnSettings'),
+    cognitiveMirrorModal: $('cognitiveMirrorModal'),
+    closeCognitiveMirrorModal: $('closeCognitiveMirrorModal'),
+    cognitiveMirrorBody: $('cognitiveMirrorBody'),
+    settingsModal: $('settingsModal'),
+    closeSettingsModal: $('closeSettingsModal'),
+    settingsModalBody: $('settingsModalBody'),
+    predictionSection: $('predictionSection'),
+    predictionSlider: $('predictionSlider'),
+    predictionValue: $('predictionValue'),
+    calibrationDisplay: $('calibrationDisplay'),
+    calPrediction: $('calPrediction'),
+    calActual: $('calActual'),
+    calDeviation: $('calDeviation'),
+    semanticNetworkSection: $('semanticNetworkSection'),
+    semanticNetworkContent: $('semanticNetworkContent'),
 };
 
 // ============================================================
@@ -354,6 +377,12 @@ async function init() {
 
     // Load weakness profile if logged in
     if (S.authToken) loadWeaknessProfile();
+
+    // Load metacognition profile (calibration enablement)
+    loadMetacognitionProfile();
+
+    // Load settings
+    loadSettings();
 
     // Critical: load sentence (with timeout protection)
     try {
@@ -522,11 +551,16 @@ async function loadSentence(forceNew = false) {
         S.dictationResults = null;
         S._dictationErrorWords = null;
         S.fsrsRated = false;
+        S.predictionScore = null;
 
         renderSentence();
         renderDictationInputs();
         updateModeUI();
         fetchReviewCount();
+
+        // Show prediction UI if calibration is enabled
+        showPredictionUI();
+        hideCalibrationResult();
     } catch (e) {
         console.error('loadSentence error:', e);
         el.sentenceEn.textContent = '加载失败，请点击刷新重试';
@@ -612,6 +646,8 @@ function renderSentence() {
     el.playbackBar.style.display = 'none';
     S.recordedBlob = null;
     S.recordedUrl = null;
+    // Hide semantic network when new sentence loads
+    if (el.semanticNetworkSection) el.semanticNetworkSection.style.display = 'none';
 }
 
 // ============================================================
@@ -826,7 +862,7 @@ function renderWords(words) {
         const arpabetStr = w.arpabet ? w.arpabet.join(' ') : '';
 
         return `
-        <div class="word-item">
+        <div class="word-item" onclick="lookupSemanticNetwork('${escapeAttr(w.word)}')">
             <div class="word-main">
                 <span class="word-word">${w.word}</span><span class="word-pos">${w.pos || ''}</span>
                 ${ipaStr ? `<div class="word-ipa">/${ipaStr}/</div>` : ''}
@@ -1330,6 +1366,22 @@ function bindEvents() {
     // Word practice modal events
     initWordPractice();
 
+    // Cognitive Mirror modal events
+    if (el.btnCognitiveMirror) el.btnCognitiveMirror.addEventListener('click', openCognitiveMirror);
+    if (el.closeCognitiveMirrorModal) el.closeCognitiveMirrorModal.addEventListener('click', () => el.cognitiveMirrorModal.style.display = 'none');
+    if (el.cognitiveMirrorModal) el.cognitiveMirrorModal.addEventListener('click', e => { if (e.target === el.cognitiveMirrorModal) el.cognitiveMirrorModal.style.display = 'none'; });
+
+    // Settings modal events
+    if (el.btnSettings) el.btnSettings.addEventListener('click', openSettingsModal);
+    if (el.closeSettingsModal) el.closeSettingsModal.addEventListener('click', () => el.settingsModal.style.display = 'none');
+    if (el.settingsModal) el.settingsModal.addEventListener('click', e => { if (e.target === el.settingsModal) el.settingsModal.style.display = 'none'; });
+
+    // Prediction slider
+    if (el.predictionSlider) el.predictionSlider.addEventListener('input', () => {
+        S.predictionScore = parseInt(el.predictionSlider.value);
+        el.predictionValue.textContent = S.predictionScore;
+    });
+
     // Auth modal events
     const authModal = document.getElementById('authModal');
     const closeAuthModal = document.getElementById('closeAuthModal');
@@ -1763,6 +1815,10 @@ function renderResults(d) {
     renderFluency(d.fluency_details || {});
     renderTips(d.tips || []);
 
+    // Show calibration result if prediction was made
+    showCalibrationResult(d.scores.overall);
+    hidePredictionUI();
+
     setTimeout(() => el.resultCard.scrollIntoView({ behavior:'smooth', block:'start' }), 300);
 }
 
@@ -1929,6 +1985,11 @@ function updateStats(data) {
             // Add pronunciation error words if any
             if (pronunciationErrorWords.length > 0) {
                 evalBody.pronunciation_error_words = pronunciationErrorWords;
+            }
+
+            // Add prediction score if calibration is enabled
+            if (S.calibrationEnabled && S.predictionScore !== null) {
+                evalBody.prediction_score = S.predictionScore;
             }
 
             fetchWithAuth(`${API}/api/learning/record-evaluation`, {
@@ -2123,6 +2184,13 @@ function renderStatsContent(stats) {
 
         ${recommendationHTML}
 
+        <!-- 认知画像 Section -->
+        <div class="stats-cognitive-profile" id="statsCognitiveProfile">
+            <div class="stats-cognitive-icon">🧠</div>
+            <div class="stats-cognitive-name">加载中...</div>
+            <div class="stats-cognitive-mini-metrics" id="statsCognitiveMetrics"></div>
+        </div>
+
         <div class="stats-grid">
             <div class="stat-card"><div class="sc-val">${totalPractice}</div><div class="sc-label">练习次数</div></div>
             <div class="stat-card"><div class="sc-val">${avg}</div><div class="sc-label">平均分</div></div>
@@ -2229,7 +2297,61 @@ function renderStatsContent(stats) {
                 ` : '<p style="font-size:13px;color:var(--text3);padding:8px 0;">暂无得分记录</p>'}
             </div>
         </div>
+
+        <!-- 语义场覆盖 Section -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsSemanticCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-blue)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                    语义场覆盖
+                </h4>
+                <span class="stats-collapse-arrow" id="statsSemanticCollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsSemanticCollapse">
+                <div id="statsSemanticCoverage">
+                    <p style="font-size:13px;color:var(--text3);padding:8px 0;">语义场数据加载中...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 探索/利用 Section -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsEECollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-orange)" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                    探索/利用
+                </h4>
+                <span class="stats-collapse-arrow" id="statsEECollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsEECollapse">
+                <div class="stats-explore-exploit" id="statsEEContent">
+                    <p style="font-size:13px;color:var(--text3);">探索/利用数据加载中...</p>
+                </div>
+            </div>
+        </div>
+
+        ${S.calibrationEnabled ? `
+        <!-- 校准分数 Section -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsCalibrationCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2"><path d="M12 20V10M18 20V4M6 20v-6"/></svg>
+                    校准分数
+                </h4>
+                <span class="stats-collapse-arrow" id="statsCalibrationCollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsCalibrationCollapse">
+                <div class="stats-calibration" id="statsCalibrationContent">
+                    <h5>🎯 预测校准</h5>
+                    <p>校准数据加载中...</p>
+                </div>
+            </div>
+        </div>
+        ` : ''}
     `;
+
+    // Load enhanced stats sections asynchronously
+    loadEnhancedStatsSections(stats);
 }
 
 // Toggle show more/less in stats sections
@@ -2264,6 +2386,100 @@ function toggleStatsCollapse(sectionId) {
     const arrowId = sectionId.replace('Collapse', 'CollapseArrow');
     const arrow = document.getElementById(arrowId);
     if (arrow) arrow.style.transform = isCollapsed ? '' : 'rotate(-90deg)';
+}
+
+// ============================================================
+// Enhanced Stats Sections Loader
+// ============================================================
+async function loadEnhancedStatsSections(stats) {
+    // Load cognitive profile
+    try {
+        const r = await fetchWithAuth(`${API}/api/metacognition/profile`);
+        if (r.ok) {
+            const profile = await r.json();
+            const cpEl = document.getElementById('statsCognitiveProfile');
+            const cmEl = document.getElementById('statsCognitiveMetrics');
+            if (cpEl && cmEl) {
+                cpEl.querySelector('.stats-cognitive-icon').textContent = profile.archetype_icon || '🧠';
+                cpEl.querySelector('.stats-cognitive-name').textContent = profile.archetype_name || '学习者';
+                const metrics = profile.metrics || {};
+                cmEl.innerHTML = `
+                    <div class="stats-cognitive-metric"><span class="val">${Math.round((metrics.speed || 0) * 100)}%</span>速度</div>
+                    <div class="stats-cognitive-metric"><span class="val">${Math.round((metrics.retention || 0) * 100)}%</span>保持</div>
+                    <div class="stats-cognitive-metric"><span class="val">${Math.round((metrics.coverage || 0) * 100)}%</span>覆盖</div>
+                `;
+            }
+        }
+    } catch { /* degrade */ }
+
+    // Load semantic field coverage
+    try {
+        const r = await fetchWithAuth(`${API}/api/semantic/field-coverage`);
+        if (r.ok) {
+            const data = await r.json();
+            const el = document.getElementById('statsSemanticCoverage');
+            if (el && data.fields) {
+                const fields = data.fields;
+                const colors = ['#3498db', '#27ae60', '#e67e22', '#8b5cf6', '#e74c3c', '#1abc9c'];
+                el.innerHTML = Object.entries(fields).map(([name, pct], i) => `
+                    <div class="stats-field-bar">
+                        <span class="stats-field-name">${name}</span>
+                        <div class="stats-field-track">
+                            <div class="stats-field-fill" style="width:${Math.round(pct * 100)}%;background:${colors[i % colors.length]};"></div>
+                        </div>
+                        <span class="stats-field-pct">${Math.round(pct * 100)}%</span>
+                    </div>
+                `).join('');
+            }
+        }
+    } catch { /* degrade */ }
+
+    // Load explore/exploit ratio
+    try {
+        const r = await fetchWithAuth(`${API}/api/learning/explore-exploit`);
+        if (r.ok) {
+            const data = await r.json();
+            const el = document.getElementById('statsEEContent');
+            if (el) {
+                const explorePct = Math.round((data.explore_ratio || 0.3) * 100);
+                const exploitPct = 100 - explorePct;
+                el.innerHTML = `
+                    <div class="stats-ee-chart">
+                        <div class="stats-pie" style="--explore-pct:${explorePct}%;">
+                            <div class="stats-pie-center">${explorePct}%</div>
+                        </div>
+                        <div class="stats-ee-legend">
+                            <div class="stats-ee-item"><span class="stats-ee-dot" style="background:var(--pri);"></span> 探索 (新内容) ${explorePct}%</div>
+                            <div class="stats-ee-item"><span class="stats-ee-dot" style="background:var(--ok);"></span> 利用 (复习) ${exploitPct}%</div>
+                        </div>
+                    </div>
+                    <p style="font-size:12px;color:var(--text3);margin-top:10px;">探索率越高越倾向学习新内容，利用率高则侧重巩固已学内容</p>
+                `;
+            }
+        }
+    } catch { /* degrade */ }
+
+    // Load calibration data
+    if (S.calibrationEnabled) {
+        try {
+            const r = await fetchWithAuth(`${API}/api/metacognition/calibration`);
+            if (r.ok) {
+                const data = await r.json();
+                const el = document.getElementById('statsCalibrationContent');
+                if (el) {
+                    const avgDeviation = data.average_deviation || 0;
+                    const calibrationScore = data.calibration_score || 0;
+                    const direction = avgDeviation > 0 ? '高估' : '低估';
+                    el.innerHTML = `
+                        <h5>🎯 预测校准</h5>
+                        <p>平均偏差: <strong style="color:${Math.abs(avgDeviation) <= 10 ? 'var(--ok)' : 'var(--warn)'};">${direction} ${Math.abs(avgDeviation).toFixed(1)}分</strong></p>
+                        <p>校准分数: <strong>${Math.round(calibrationScore * 100)}%</strong></p>
+                        <p style="margin-top:6px;font-size:11px;color:var(--text3);">校准分数越高，你的自我评估越准确</p>
+                    `;
+                }
+            }
+        } catch { /* degrade */ }
+    }
 }
 
 // ============================================================
@@ -2635,20 +2851,20 @@ function renderSingleWordReviewCard(data) {
         
         <div class="word-review-rating">
             <button class="word-review-rating-btn r1" data-rating="1">
-                忘了
-                <span class="word-review-rating-label">Again</span>
+                Again
+                <span class="word-review-rating-label">完全忘记</span>
             </button>
             <button class="word-review-rating-btn r2" data-rating="2">
-                难
-                <span class="word-review-rating-label">Hard</span>
+                Hard
+                <span class="word-review-rating-label">困难回忆</span>
             </button>
             <button class="word-review-rating-btn r3" data-rating="3">
-                模糊
-                <span class="word-review-rating-label">Good</span>
+                Good
+                <span class="word-review-rating-label">犹豫想起</span>
             </button>
             <button class="word-review-rating-btn r4" data-rating="4">
-                会了
-                <span class="word-review-rating-label">Easy</span>
+                Easy
+                <span class="word-review-rating-label">轻松回忆</span>
             </button>
         </div>
     </div>
@@ -3014,7 +3230,7 @@ async function submitPronunciationPractice() {
             const score = data.effective_score || 0;
             const rating = data.auto_rating || 1;
             const ratingNames = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
-            const ratingColors = { 1: '#e74c3c', 2: '#e67e22', 3: '#27ae60', 4: '#27ae60' };
+            const ratingColors = { 1: 'var(--fsrs-again)', 2: 'var(--fsrs-hard)', 3: 'var(--fsrs-good)', 4: 'var(--fsrs-easy)' };
 
             const resultClass = score >= 70 ? 'correct' : score >= 50 ? 'partial-result' : 'incorrect';
             resultArea.innerHTML = `
@@ -3059,7 +3275,7 @@ async function submitDictationPractice() {
         if (r.ok) {
             const data = await r.json();
             const ratingNames = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
-            const ratingColors = { 1: '#e74c3c', 2: '#e67e22', 3: '#27ae60', 4: '#27ae60' };
+            const ratingColors = { 1: 'var(--fsrs-again)', 2: 'var(--fsrs-hard)', 3: 'var(--fsrs-good)', 4: 'var(--fsrs-easy)' };
             const resultClass = data.correct ? 'correct' : data.type === 'partial' ? 'partial-result' : 'incorrect';
             const resultIcon = data.correct ? '✅' : data.type === 'partial' ? '🔶' : '❌';
 
@@ -3159,3 +3375,429 @@ function renderErrorStats(data) {
 // Boot
 // ============================================================
 document.addEventListener('DOMContentLoaded', init);
+
+// ============================================================
+// Metacognition / Prediction Calibration
+// ============================================================
+async function loadMetacognitionProfile() {
+    try {
+        const r = await fetchWithAuth(`${API}/api/metacognition/profile`);
+        if (r.ok) {
+            const data = await r.json();
+            S.calibrationEnabled = data.calibration_enabled || false;
+        }
+    } catch { /* feature not available, degrade gracefully */ }
+}
+
+function showPredictionUI() {
+    if (!S.calibrationEnabled || !el.predictionSection) return;
+    el.predictionSection.style.display = '';
+    S.predictionScore = parseInt(el.predictionSlider?.value || 50);
+    if (el.predictionValue) el.predictionValue.textContent = S.predictionScore;
+}
+
+function hidePredictionUI() {
+    if (el.predictionSection) el.predictionSection.style.display = 'none';
+}
+
+function showCalibrationResult(actualScore) {
+    if (!S.calibrationEnabled || S.predictionScore === null) return;
+    if (el.calibrationDisplay) el.calibrationDisplay.style.display = '';
+    const pred = S.predictionScore;
+    const deviation = pred - actualScore;
+    if (el.calPrediction) el.calPrediction.textContent = pred;
+    if (el.calActual) el.calActual.textContent = actualScore;
+    if (el.calDeviation) {
+        el.calDeviation.textContent = (deviation >= 0 ? '+' : '') + deviation;
+        el.calDeviation.style.color = Math.abs(deviation) <= 10 ? 'var(--ok)' : Math.abs(deviation) <= 25 ? 'var(--warn)' : 'var(--err)';
+    }
+}
+
+function hideCalibrationResult() {
+    if (el.calibrationDisplay) el.calibrationDisplay.style.display = 'none';
+}
+
+// ============================================================
+// Cognitive Mirror Modal
+// ============================================================
+async function openCognitiveMirror() {
+    if (!el.cognitiveMirrorModal) return;
+    el.cognitiveMirrorModal.style.display = 'flex';
+    el.cognitiveMirrorBody.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载认知画像...</div>';
+
+    let profile = null;
+    try {
+        const r = await fetchWithAuth(`${API}/api/metacognition/profile`);
+        if (r.ok) profile = await r.json();
+    } catch { /* degrade */ }
+
+    if (!profile) {
+        el.cognitiveMirrorBody.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);">认知画像暂不可用，开始练习后即可查看</div>';
+        return;
+    }
+
+    const metrics = profile.metrics || {};
+    const metricNames = {
+        speed: { label: '学习速度', color: 'var(--pri)' },
+        retention: { label: '记忆保持', color: 'var(--ok)' },
+        coverage: { label: '知识覆盖', color: 'var(--accent-blue)' },
+        confidence_gap: { label: '自信偏差', color: 'var(--warn)' },
+        again_rate: { label: '重复率', color: 'var(--fsrs-again)' },
+        easy_rate: { label: '轻松率', color: 'var(--fsrs-easy)' },
+    };
+
+    let metricsHTML = '';
+    for (const [key, info] of Object.entries(metricNames)) {
+        const val = metrics[key] !== undefined ? Math.round(metrics[key] * 100) : 0;
+        metricsHTML += `
+        <div class="metric-bar-item">
+            <span class="metric-bar-label">${info.label}</span>
+            <div class="metric-bar-track">
+                <div class="metric-bar-fill" style="width:${val}%;background:${info.color};"></div>
+            </div>
+            <span class="metric-bar-val" style="color:${info.color};">${val}%</span>
+        </div>`;
+    }
+
+    let strengthsHTML = '';
+    if (profile.strengths && profile.strengths.length > 0) {
+        strengthsHTML = '<ul class="cognitive-mirror-list">' +
+            profile.strengths.map(s => `<li><span class="icon">💪</span>${s}</li>`).join('') +
+            '</ul>';
+    }
+
+    let weaknessesHTML = '';
+    if (profile.weaknesses && profile.weaknesses.length > 0) {
+        weaknessesHTML = '<ul class="cognitive-mirror-list">' +
+            profile.weaknesses.map(w => `<li><span class="icon">⚠️</span>${w}</li>`).join('') +
+            '</ul>';
+    }
+
+    // Fetch strategies
+    let strategiesHTML = '';
+    try {
+        const sr = await fetchWithAuth(`${API}/api/metacognition/strategies`);
+        if (sr.ok) {
+            const strategies = await sr.json();
+            if (strategies.recommendations && strategies.recommendations.length > 0) {
+                strategiesHTML = `
+                <div class="cognitive-mirror-strategies">
+                    <h5>📋 策略推荐</h5>
+                    <ul class="cognitive-mirror-list">
+                        ${strategies.recommendations.map(r => `<li><span class="icon">✅</span>${r}</li>`).join('')}
+                    </ul>
+                    ${strategies.param_adjustments ? `<button class="btn-apply-strategy" onclick="applyStrategyRecommendations()">应用推荐设置</button>` : ''}
+                </div>`;
+            }
+        }
+    } catch { /* no strategies available */ }
+
+    el.cognitiveMirrorBody.innerHTML = `
+        <div class="cognitive-mirror-hero">
+            <div class="cognitive-mirror-icon">${profile.archetype_icon || '🧠'}</div>
+            <div class="cognitive-mirror-name">${profile.archetype_name || '学习者'}</div>
+            <div class="cognitive-mirror-desc">${profile.description || ''}</div>
+        </div>
+
+        <div class="cognitive-mirror-section">
+            <h5>📊 认知指标</h5>
+            ${metricsHTML}
+        </div>
+
+        ${strengthsHTML ? `<div class="cognitive-mirror-section"><h5>💪 优势</h5>${strengthsHTML}</div>` : ''}
+        ${weaknessesHTML ? `<div class="cognitive-mirror-section"><h5>⚠️ 待改善</h5>${weaknessesHTML}</div>` : ''}
+
+        ${strategiesHTML}
+    `;
+}
+
+async function applyStrategyRecommendations() {
+    try {
+        const r = await fetchWithAuth(`${API}/api/metacognition/strategies`);
+        if (r.ok) {
+            const strategies = await r.json();
+            if (strategies.param_adjustments) {
+                await fetchWithAuth(`${API}/api/settings`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(strategies.param_adjustments),
+                });
+                loadSettings();
+                alert('已应用推荐设置！');
+            }
+        }
+    } catch { alert('应用设置失败'); }
+}
+window.applyStrategyRecommendations = applyStrategyRecommendations;
+
+// ============================================================
+// Semantic Network Viewer
+// ============================================================
+async function lookupSemanticNetwork(word) {
+    if (!el.semanticNetworkSection || !el.semanticNetworkContent) return;
+    el.semanticNetworkSection.style.display = '';
+    el.semanticNetworkContent.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载词汇网络...</div>';
+
+    try {
+        const r = await fetchWithAuth(`${API}/api/semantic/network/${encodeURIComponent(word)}?depth=1`);
+        if (!r.ok) throw new Error('not available');
+        const data = await r.json();
+
+        const relationGroups = {
+            COOCCURRENCE: { label: '搭配词', cls: 'cooccurrence', color: 'var(--tag-cooccurrence)' },
+            SEMANTIC_SIMILARITY: { label: '相似词', cls: 'similar', color: 'var(--tag-similar)' },
+            SYNTAGMATIC: { label: '同位词', cls: 'syntagmatic', color: 'var(--tag-syntagmatic)' },
+            PARADIGMATIC: { label: '近义词', cls: 'paradigmatic', color: 'var(--tag-paradigmatic)' },
+        };
+
+        let html = `<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:10px;">"${word}" 的词汇网络</div>`;
+
+        const relations = data.relations || {};
+        let hasAny = false;
+
+        for (const [type, group] of Object.entries(relationGroups)) {
+            const words = relations[type] || [];
+            if (words.length === 0) continue;
+            hasAny = true;
+            html += `
+            <div class="semantic-group">
+                <div class="semantic-group-title">
+                    <span class="dot" style="background:${group.color};"></span>
+                    ${group.label}
+                </div>
+                <div class="semantic-tags">
+                    ${words.map(w => {
+                        const strength = w.strength !== undefined ? w.strength : 1;
+                        const opacity = 0.4 + strength * 0.6;
+                        const weight = strength > 0.7 ? 800 : strength > 0.4 ? 600 : 400;
+                        return `<span class="semantic-tag ${group.cls}" style="opacity:${opacity};font-weight:${weight};" onclick="lookupSemanticNetwork('${escapeAttr(w.word || w)}')">${w.word || w}<span class="strength">${Math.round(strength * 100)}%</span></span>`;
+                    }).join('')}
+                </div>
+            </div>`;
+        }
+
+        if (!hasAny) {
+            html += '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">暂无关联词汇数据</div>';
+        }
+
+        el.semanticNetworkContent.innerHTML = html;
+    } catch {
+        el.semanticNetworkContent.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">词汇网络暂不可用</div>';
+    }
+}
+window.lookupSemanticNetwork = lookupSemanticNetwork;
+
+// ============================================================
+// Settings Modal
+// ============================================================
+async function loadSettings() {
+    try {
+        const r = await fetchWithAuth(`${API}/api/settings`);
+        if (r.ok) {
+            S.settings = await r.json();
+            return S.settings;
+        }
+    } catch { /* degrade */ }
+    S.settings = S.settings || {};
+    return S.settings;
+}
+
+function openSettingsModal() {
+    if (!el.settingsModal) return;
+    el.settingsModal.style.display = 'flex';
+
+    const s = S.settings || {};
+    const fsrs = s.fsrs || {};
+    const learning = s.learning || {};
+    const display = s.display || {};
+
+    el.settingsModalBody.innerHTML = `
+        <!-- FSRS Settings -->
+        <div class="settings-group">
+            <div class="settings-group-title">
+                🧠 FSRS 间隔重复
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">期望记忆率</span>
+                <div class="settings-row-value">
+                    <input type="range" class="settings-slider" id="setDesiredRetention" min="0.8" max="0.99" step="0.01" value="${fsrs.desired_retention || 0.9}">
+                    <span class="settings-slider-val" id="setDesiredRetentionVal">${fsrs.desired_retention || 0.9}</span>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">每日新卡</span>
+                <div class="settings-row-value">
+                    <input type="number" class="settings-input" id="setNewCardsDay" min="1" max="20" value="${fsrs.new_cards_per_day || 5}">
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">最大间隔(天)</span>
+                <div class="settings-row-value">
+                    <input type="number" class="settings-input" id="setMaxInterval" min="1" max="36500" value="${fsrs.maximum_interval || 36500}">
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">学习步骤(分钟)</span>
+                <div class="settings-row-value">
+                    <input type="text" class="settings-input settings-input-wide" id="setLearningSteps" value="${(fsrs.learning_steps || ['1','10']).join(',')}">
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">重学步骤(分钟)</span>
+                <div class="settings-row-value">
+                    <input type="text" class="settings-input settings-input-wide" id="setRelearningSteps" value="${(fsrs.relearning_steps || ['10']).join(',')}">
+                </div>
+            </div>
+            <div style="text-align:right;margin-top:8px;">
+                <button class="settings-btn-fit" id="btnFsrsFit">优化参数</button>
+            </div>
+        </div>
+
+        <!-- Learning Settings -->
+        <div class="settings-group">
+            <div class="settings-group-title">
+                📚 学习设置
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">探索率</span>
+                <div class="settings-row-value">
+                    <input type="range" class="settings-slider" id="setExplorationRate" min="0" max="1" step="0.05" value="${learning.exploration_rate !== undefined ? learning.exploration_rate : 0.3}">
+                    <span class="settings-slider-val" id="setExplorationRateVal">${learning.exploration_rate !== undefined ? learning.exploration_rate : 0.3}</span>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">启用预测校准</span>
+                <button class="settings-toggle ${S.calibrationEnabled ? 'active' : ''}" id="setCalibration">
+                    <div class="settings-toggle-knob"></div>
+                </button>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">自动应用策略推荐</span>
+                <button class="settings-toggle ${learning.auto_apply_strategy ? 'active' : ''}" id="setAutoStrategy">
+                    <div class="settings-toggle-knob"></div>
+                </button>
+            </div>
+        </div>
+
+        <!-- Display Settings -->
+        <div class="settings-group">
+            <div class="settings-group-title">
+                🎨 显示设置
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">默认显示音标</span>
+                <button class="settings-toggle ${display.show_ipa_default ? 'active' : ''}" id="setShowIPA">
+                    <div class="settings-toggle-knob"></div>
+                </button>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">自动播放TTS</span>
+                <button class="settings-toggle ${display.auto_play_tts ? 'active' : ''}" id="setAutoTTS">
+                    <div class="settings-toggle-knob"></div>
+                </button>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">听写默认速度</span>
+                <div class="settings-row-value">
+                    <select class="settings-select" id="setDictationSpeed">
+                        <option value="0.5" ${display.dictation_speed === 0.5 ? 'selected' : ''}>0.5x</option>
+                        <option value="0.75" ${display.dictation_speed === 0.75 ? 'selected' : ''}>0.75x</option>
+                        <option value="1.0" ${(!display.dictation_speed || display.dictation_speed === 1.0) ? 'selected' : ''}>1.0x</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="settings-btn-row">
+            <button class="settings-btn-secondary" id="btnResetSettings">恢复默认</button>
+            <button class="settings-btn-primary" id="btnSaveSettings">保存设置</button>
+        </div>
+    `;
+
+    // Bind settings modal interactions
+    const sliderRetention = document.getElementById('setDesiredRetention');
+    const sliderRetentionVal = document.getElementById('setDesiredRetentionVal');
+    if (sliderRetention && sliderRetentionVal) {
+        sliderRetention.addEventListener('input', () => { sliderRetentionVal.textContent = sliderRetention.value; });
+    }
+
+    const sliderExplore = document.getElementById('setExplorationRate');
+    const sliderExploreVal = document.getElementById('setExplorationRateVal');
+    if (sliderExplore && sliderExploreVal) {
+        sliderExplore.addEventListener('input', () => { sliderExploreVal.textContent = sliderExplore.value; });
+    }
+
+    // Toggle buttons
+    document.querySelectorAll('.settings-toggle').forEach(toggle => {
+        toggle.addEventListener('click', () => toggle.classList.toggle('active'));
+    });
+
+    // FSRS fit button
+    const btnFit = document.getElementById('btnFsrsFit');
+    if (btnFit) btnFit.addEventListener('click', async () => {
+        btnFit.textContent = '优化中...';
+        btnFit.disabled = true;
+        try {
+            const r = await fetchWithAuth(`${API}/api/settings/fsrs-fit`, { method: 'POST' });
+            if (r.ok) {
+                btnFit.textContent = '✓ 优化完成';
+                await loadSettings();
+                setTimeout(() => openSettingsModal(), 500);
+            } else {
+                btnFit.textContent = '优化失败';
+            }
+        } catch { btnFit.textContent = '优化失败'; }
+        setTimeout(() => { btnFit.textContent = '优化参数'; btnFit.disabled = false; }, 2000);
+    });
+
+    // Reset button
+    const btnReset = document.getElementById('btnResetSettings');
+    if (btnReset) btnReset.addEventListener('click', async () => {
+        if (!confirm('确定要恢复默认设置吗？')) return;
+        try {
+            await fetchWithAuth(`${API}/api/settings/reset`, { method: 'POST' });
+            await loadSettings();
+            openSettingsModal();
+        } catch { alert('重置失败'); }
+    });
+
+    // Save button
+    const btnSave = document.getElementById('btnSaveSettings');
+    if (btnSave) btnSave.addEventListener('click', async () => {
+        const settings = {
+            fsrs: {
+                desired_retention: parseFloat(document.getElementById('setDesiredRetention')?.value || 0.9),
+                new_cards_per_day: parseInt(document.getElementById('setNewCardsDay')?.value || 5),
+                maximum_interval: parseInt(document.getElementById('setMaxInterval')?.value || 36500),
+                learning_steps: (document.getElementById('setLearningSteps')?.value || '1,10').split(',').map(s => s.trim()),
+                relearning_steps: (document.getElementById('setRelearningSteps')?.value || '10').split(',').map(s => s.trim()),
+            },
+            learning: {
+                exploration_rate: parseFloat(document.getElementById('setExplorationRate')?.value || 0.3),
+                calibration_enabled: document.getElementById('setCalibration')?.classList.contains('active') || false,
+                auto_apply_strategy: document.getElementById('setAutoStrategy')?.classList.contains('active') || false,
+            },
+            display: {
+                show_ipa_default: document.getElementById('setShowIPA')?.classList.contains('active') || false,
+                auto_play_tts: document.getElementById('setAutoTTS')?.classList.contains('active') || false,
+                dictation_speed: parseFloat(document.getElementById('setDictationSpeed')?.value || 1.0),
+            },
+        };
+
+        try {
+            await fetchWithAuth(`${API}/api/settings`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(settings),
+            });
+            S.settings = settings;
+            S.calibrationEnabled = settings.learning.calibration_enabled;
+            alert('设置已保存！');
+        } catch { alert('保存失败'); }
+    });
+}
+
+// ============================================================
+// Enhanced Stats Dashboard
+// ============================================================

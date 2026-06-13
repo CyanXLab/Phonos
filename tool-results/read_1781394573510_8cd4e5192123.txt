@@ -1,0 +1,2002 @@
+     1→"""
+     2→Phonos 口语练习平台 - FastAPI 后端
+     3→
+     4→优化点:
+     5→- 延迟加载词典（首次查询时才加载）
+     6→- 音素缓存后台更新（不阻塞启动）
+     7→- 句子按需enrich（不一次性处理所有句子）
+     8→- 免费网络API回退（ENDICT查不到的词）
+     9→- ONNX 翻译模型在线API失败时自动回退
+    10→"""
+    11→
+    12→import os
+    13→import sys
+    14→import traceback
+    15→import tempfile
+    16→import random
+    17→import asyncio
+    18→import time
+    19→import warnings
+    20→from pathlib import Path
+    21→from typing import Optional
+    22→
+    23→from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request, Depends
+    24→from fastapi.middleware.cors import CORSMiddleware
+    25→from fastapi.staticfiles import StaticFiles
+    26→from fastapi.responses import FileResponse, JSONResponse
+    27→import numpy as np
+    28→
+    29→sys.path.insert(0, str(Path(__file__).parent))
+    30→
+    31→from phoneme_data import (
+    32→    PRESET_SENTENCES, PHONEME_TIPS, MINIMAL_PAIRS,
+    33→    ARPABET_TO_IPA, VOCAB,
+    34→    update_phoneme_cache,
+    35→)
+    36→from g2p_service import get_g2p_service, G2PService
+    37→from onnx_service import get_recognizer
+    38→from scoring import evaluate_pronunciation, generate_error_tips, result_to_dict
+    39→from fsrs_db import get_fsrs_db
+    40→from tts_service import generate_tts, generate_phoneme_audio, check_tts_available
+    41→from dict_service import get_dict_service
+    42→from translate_service import translate_text, translate_text_detail, get_translate_status
+    43→from auth_service import get_auth_service
+    44→from learning_algorithm import get_learning_algorithm
+    45→from metacognition import get_metacognition
+    46→from semantic_network import get_semantic_network
+    47→
+    48→app = FastAPI(title="Phonos 口语练习平台", version="2.1.0")
+    49→
+    50→app.add_middleware(
+    51→    CORSMiddleware,
+    52→    allow_origins=["*"],
+    53→    allow_credentials=True,
+    54→    allow_methods=["*"],
+    55→    allow_headers=["*"],
+    56→)
+    57→
+    58→# 模型路径
+    59→_SCRIPT_DIR = Path(__file__).resolve().parent
+    60→_PROJECT_ROOT = _SCRIPT_DIR.parent
+    61→
+    62→def _find_model() -> str:
+    63→    """自动查找 ONNX 模型文件"""
+    64→    env_path = os.environ.get("HUPER_MODEL_PATH", "")
+    65→    if env_path and os.path.isfile(env_path):
+    66→        return env_path
+    67→
+    68→    search_paths = [
+    69→        _PROJECT_ROOT / "models" / "model.onnx",
+    70→        _PROJECT_ROOT / "models" / "model_quantized.onnx",
+    71→        _SCRIPT_DIR / "models" / "model.onnx",
+    72→        _SCRIPT_DIR / "models" / "model_quantized.onnx",
+    73→        _PROJECT_ROOT / "huper_onnx" / "model.onnx",
+    74→        _PROJECT_ROOT / "huper_onnx_int8_dynamic" / "model_quantized.onnx",
+    75→    ]
+    76→    for p in search_paths:
+    77→        if p.is_file():
+    78→            return str(p)
+    79→
+    80→    return ""
+    81→
+    82→MODEL_PATH = _find_model()
+    83→_phoneme_cache: dict = {}
+    84→_model_loaded = False
+    85→
+    86→
+    87→@app.on_event("startup")
+    88→async def startup():
+    89→    print("[启动] 初始化 Phonos 口语练习平台...")
+    90→
+    91→    # 1. 初始化 G2P 服务（轻量，不阻塞）
+    92→    g2p = get_g2p_service()
+    93→    print(f"[启动] G2P 服务就绪 (g2p_en: {'可用' if g2p.available else '不可用，使用词典'})")
+    94→
+    95→    # 2. 初始化词典服务（延迟加载，不在此读取文件）
+    96→    get_dict_service()
+    97→    print("[启动] 词典服务就绪（延迟加载）")
+    98→
+    99→    # 3. 后台更新音素缓存（不阻塞启动，用户可立即访问）
+   100→    asyncio.create_task(_background_update_cache())
+   101→
+   102→    # 4. 加载 ONNX 模型（后台，不阻塞）
+   103→    if MODEL_PATH and os.path.exists(MODEL_PATH):
+   104→        asyncio.create_task(_background_load_model())
+   105→    else:
+   106→        print("[启动] ⚠️  未找到 ONNX 模型，请将模型文件放到以下位置之一:")
+   107→        print(f"         - {_PROJECT_ROOT / 'model' / 'model.onnx'}")
+   108→        print(f"         - {_PROJECT_ROOT / 'model' / 'model_quantized.onnx'}")
+   109→        print("         或设置环境变量 HUPER_MODEL_PATH 指定模型路径")
+   110→
+   111→    # 5. 初始化 FSRS 数据库
+   112→    try:
+   113→        fsrs = get_fsrs_db()
+   114→        print(f"[启动] FSRS 数据库就绪")
+   115→    except Exception as e:
+   116→        print(f"[启动] ⚠️  FSRS 数据库初始化失败: {e}")
+   117→
+   118→    # 5.5 初始化认证服务和智能学习服务
+   119→    try:
+   120→        auth = get_auth_service()
+   121→        print(f"[启动] 认证服务就绪")
+   122→    except Exception as e:
+   123→        print(f"[启动] ⚠️  认证服务初始化失败: {e}")
+   124→
+   125→    try:
+   126→        learning = get_learning_algorithm()
+   127→        print(f"[启动] 智能学习服务就绪")
+   128→    except Exception as e:
+   129→        print(f"[启动] ⚠️  智能学习服务初始化失败: {e}")
+   130→
+   131→    # 6. TTS 可用性检查
+   132→    tts_status = check_tts_available()
+   133→    available_engines = [k for k, v in tts_status.items() if v]
+   134→    if available_engines:
+   135→        print(f"[启动] TTS 服务可用: {', '.join(available_engines)}")
+   136→    else:
+   137→        print("[启动] ⚠️  TTS 服务不可用，请安装 edge-tts 或 pyttsx3")
+   138→
+   139→    print(f"[启动] 句子数据: {len(PRESET_SENTENCES)} 个预设句子")
+   140→    print("[启动] 平台初始化完成（后台加载模型和音素缓存...）")
+   141→
+   142→
+   143→async def _background_load_model():
+   144→    """后台加载 ONNX 模型"""
+   145→    global _model_loaded
+   146→    try:
+   147→        get_recognizer(MODEL_PATH)
+   148→        _model_loaded = True
+   149→        print(f"[后台] ONNX 模型加载成功: {MODEL_PATH}")
+   150→    except Exception as e:
+   151→        print(f"[后台] ONNX 模型加载失败: {e}")
+   152→
+   153→
+   154→async def _background_update_cache():
+   155→    """后台增量更新音素缓存"""
+   156→    global _phoneme_cache
+   157→    try:
+   158→        g2p = get_g2p_service()
+   159→        # 在线程池中执行，避免阻塞事件循环
+   160→        loop = asyncio.get_event_loop()
+   161→        _phoneme_cache = await loop.run_in_executor(
+   162→            None, update_phoneme_cache, PRESET_SENTENCES, g2p
+   163→        )
+   164→        print(f"[后台] 音素缓存更新完成: {len(_phoneme_cache)} 条")
+   165→
+   166→        # 同时为所有句子创建 FSRS 卡片（default 用户）
+   167→        try:
+   168→            fsrs = get_fsrs_db()
+   169→            for sentence in PRESET_SENTENCES:
+   170→                card_id = f"sentence_{sentence['id']}"
+   171→                fsrs.ensure_card(card_id, card_type="sentence", user_id="default")
+   172→            print(f"[后台] FSRS 卡片就绪: {len(PRESET_SENTENCES)} 个")
+   173→        except Exception as e:
+   174→            print(f"[后台] FSRS 卡片创建失败: {e}")
+   175→
+   176→    except Exception as e:
+   177→        print(f"[后台] 音素缓存更新失败: {e}")
+   178→
+   179→
+   180→# ============================================================
+   181→# 认证辅助函数
+   182→# ============================================================
+   183→
+   184→def get_current_user(request: Request) -> dict:
+   185→    """从请求头获取当前用户，无token时返回默认用户"""
+   186→    auth_header = request.headers.get("Authorization", "")
+   187→    token = ""
+   188→    if auth_header.startswith("Bearer "):
+   189→        token = auth_header[7:]
+   190→    auth = get_auth_service()
+   191→    return auth.get_user_by_token(token)
+   192→
+   193→
+   194→# ============================================================
+   195→# API 路由
+   196→# ============================================================
+   197→
+   198→@app.get("/api/health")
+   199→async def health_check():
+   200→    model_ok = MODEL_PATH != "" and os.path.exists(MODEL_PATH)
+   201→    try:
+   202→        get_recognizer()
+   203→        model_loaded = True
+   204→    except:
+   205→        model_loaded = False
+   206→
+   207→    tts_status = check_tts_available()
+   208→
+   209→    return {
+   210→        "status": "ok",
+   211→        "model_loaded": model_loaded or model_ok,
+   212→        "g2p_available": get_g2p_service().available,
+   213→        "tts_available": tts_status,
+   214→        "fsrs_available": True,
+   215→        "phoneme_cache_ready": len(_phoneme_cache) > 0,
+   216→        "translate_status": get_translate_status(),
+   217→    }
+   218→
+   219→
+   220→# ============================================================
+   221→# 认证 API
+   222→# ============================================================
+   223→
+   224→@app.post("/api/auth/register")
+   225→async def auth_register(data: dict):
+   226→    auth = get_auth_service()
+   227→    try:
+   228→        result = auth.register(
+   229→            username=data.get("username", ""),
+   230→            password=data.get("password", ""),
+   231→            display_name=data.get("display_name", ""),
+   232→        )
+   233→        return result
+   234→    except ValueError as e:
+   235→        raise HTTPException(status_code=400, detail=str(e))
+   236→
+   237→
+   238→@app.post("/api/auth/login")
+   239→async def auth_login(data: dict):
+   240→    auth = get_auth_service()
+   241→    try:
+   242→        result = auth.login(
+   243→            username=data.get("username", ""),
+   244→            password=data.get("password", ""),
+   245→        )
+   246→        return result
+   247→    except ValueError as e:
+   248→        raise HTTPException(status_code=401, detail=str(e))
+   249→
+   250→
+   251→@app.post("/api/auth/logout")
+   252→async def auth_logout(request: Request):
+   253→    auth_header = request.headers.get("Authorization", "")
+   254→    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+   255→    if token:
+   256→        auth = get_auth_service()
+   257→        auth.logout(token)
+   258→    return {"ok": True}
+   259→
+   260→
+   261→@app.get("/api/auth/me")
+   262→async def auth_me(user: dict = Depends(get_current_user)):
+   263→    return user
+   264→
+   265→
+   266→@app.put("/api/auth/profile")
+   267→async def auth_update_profile(data: dict, user: dict = Depends(get_current_user)):
+   268→    auth = get_auth_service()
+   269→    try:
+   270→        result = auth.update_profile(
+   271→            user_id=user["id"],
+   272→            display_name=data.get("display_name"),
+   273→            settings=data.get("settings"),
+   274→        )
+   275→        return result
+   276→    except ValueError as e:
+   277→        raise HTTPException(status_code=400, detail=str(e))
+   278→
+   279→
+   280→@app.put("/api/auth/password")
+   281→async def auth_change_password(data: dict, user: dict = Depends(get_current_user)):
+   282→    auth = get_auth_service()
+   283→    try:
+   284→        auth.change_password(
+   285→            user_id=user["id"],
+   286→            old_password=data.get("old_password", ""),
+   287→            new_password=data.get("new_password", ""),
+   288→        )
+   289→        return {"ok": True}
+   290→    except ValueError as e:
+   291→        raise HTTPException(status_code=400, detail=str(e))
+   292→
+   293→
+   294→# 注意：不提供 /api/auth/users 接口，不暴露其他用户账号信息
+   295→
+   296→
+   297→# ============================================================
+   298→# 智能学习 API
+   299→# ============================================================
+   300→
+   301→@app.get("/api/learning/weakness-profile")
+   302→async def learning_weakness_profile(user: dict = Depends(get_current_user)):
+   303→    learning = get_learning_algorithm()
+   304→    return learning.get_weakness_profile(user["id"])
+   305→
+   306→
+   307→@app.get("/api/learning/recommendations")
+   308→async def learning_recommendations(user: dict = Depends(get_current_user)):
+   309→    learning = get_learning_algorithm()
+   310→    return learning.get_recommendations(user["id"], PRESET_SENTENCES)
+   311→
+   312→
+   313→@app.get("/api/learning/adaptive-next")
+   314→async def learning_adaptive_next(user: dict = Depends(get_current_user)):
+   315→    learning = get_learning_algorithm()
+   316→    result = learning.get_adaptive_next(user["id"], PRESET_SENTENCES)
+   317→    if result:
+   318→        enriched = await _enrich_sentence_async(result)
+   319→        return enriched
+   320→    return None
+   321→
+   322→
+   323→@app.get("/api/learning/analytics")
+   324→async def learning_analytics(user: dict = Depends(get_current_user)):
+   325→    learning = get_learning_algorithm()
+   326→    return learning.get_analytics(user["id"])
+   327→
+   328→
+   329→@app.get("/api/stats")
+   330→async def get_user_stats(user: dict = Depends(get_current_user)):
+   331→    """获取当前用户的完整统计（从数据库，跨浏览器同步）"""
+   332→    user_id = user.get("id", "default")
+   333→    learning = get_learning_algorithm()
+   334→    fsrs = get_fsrs_db()
+   335→
+   336→    # 1. 学习算法统计（评测记录、错误音素、单词进度）
+   337→    analytics = learning.get_analytics(user_id)
+   338→
+   339→    # 2. FSRS 统计
+   340→    fsrs_stats = fsrs.get_stats(user_id)
+   341→
+   342→    # 3. 错误音素详情（用于前端错误统计展示）
+   343→    weakness = learning.get_weakness_profile(user_id)
+   344→
+   345→    # 4. 最近的得分记录
+   346→    conn = learning._get_conn() if hasattr(learning, '_get_conn') else None
+   347→    recent_scores = []
+   348→    total_practice = 0
+   349→    words_learned = {}
+   350→    error_phonemes = {}
+   351→
+   352→    try:
+   353→        import sqlite3
+   354→        conn2 = sqlite3.connect(learning.db_path)
+   355→        # 最近50次得分
+   356→        rows = conn2.execute(
+   357→            "SELECT overall_score FROM user_evaluations WHERE user_id = ? ORDER BY evaluated_at DESC LIMIT 50",
+   358→            (user_id,)
+   359→        ).fetchall()
+   360→        recent_scores = [r[0] for r in rows]
+   361→
+   362→        # 总练习次数
+   363→        total_practice = conn2.execute(
+   364→            "SELECT COUNT(*) FROM user_evaluations WHERE user_id = ?", (user_id,)
+   365→        ).fetchone()[0]
+   366→
+   367→        # 单词掌握情况（发音评测数据）
+   368→        word_rows = conn2.execute(
+   369→            "SELECT word, attempts, best_score, avg_score, mastered FROM user_word_progress WHERE user_id = ? ORDER BY avg_score ASC",
+   370→            (user_id,)
+   371→        ).fetchall()
+   372→        for r in word_rows:
+   373→            words_learned[r[0]] = {
+   374→                "attempts": r[1], 
+   375→                "best": round(r[2], 1), 
+   376→                "avg": round(r[3], 1), 
+   377→                "mastered": bool(r[4]),
+   378→                "source": "pronunciation"
+   379→            }
+   380→
+   381→        # 错误音素统计
+   382→        phoneme_rows = conn2.execute(
+   383→            "SELECT phoneme, total_attempts, error_count, error_rate FROM user_phoneme_stats WHERE user_id = ? ORDER BY error_count DESC",
+   384→            (user_id,)
+   385→        ).fetchall()
+   386→        error_phonemes = {r[0]: r[2] for r in phoneme_rows}
+   387→
+   388→        # 听写错误单词数据（合并到 words_learned）
+   389→        error_word_rows = conn2.execute(
+   390→            "SELECT word, error_type, count FROM user_word_errors WHERE user_id = ?",
+   391→            (user_id,)
+   392→        ).fetchall()
+   393→        for r in error_word_rows:
+   394→            word = r[0]
+   395→            if word not in words_learned:
+   396→                words_learned[word] = {
+   397→                    "attempts": 0, "best": 0, "avg": 0, "mastered": False, "source": "dictation"
+   398→                }
+   399→            if r[1] == 'dictation':
+   400→                words_learned[word]["dictation_errors"] = r[2]
+   401→            elif r[1] == 'pronunciation':
+   402→                words_learned[word]["pronunciation_errors"] = r[2]
+   403→
+   404→        conn2.close()
+   405→    except Exception as e:
+   406→        print(f"[统计] 查询失败: {e}")
+   407→
+   408→    # 补充 FSRS 单词卡片数据（掌握度从 FSRS 状态推断）
+   409→    try:
+   410→        now = time.time()
+   411→        import sqlite3 as _sql3
+   412→        conn3 = _sql3.connect(fsrs.db_path)
+   413→        word_card_rows = conn3.execute(
+   414→            "SELECT card_id, state, difficulty, stability, reps, scheduled_days, due, last_review "
+   415→            "FROM cards WHERE card_type='word' AND user_id=?",
+   416→            (user_id,)
+   417→        ).fetchall()
+   418→        for r in word_card_rows:
+   419→            word = r[0].replace("word_", "", 1)
+   420→            state = r[1]  # 0=new, 1=learning, 2=review, 3=relearning
+   421→            difficulty = r[2]
+   422→            stability = r[3]
+   423→            reps = r[4]
+   424→            scheduled_days = r[5]
+   425→            due = r[6]
+   426→            last_review = r[7]
+   427→
+   428→            # 推断掌握度
+   429→            if state == 0:
+   430→                mastery = "new"
+   431→            elif state == 1:
+   432→                mastery = "learning"
+   433→            elif state == 2 and due > now:
+   434→                mastery = "mastered"  # 已复习且未到期 = 已掌握
+   435→            elif state == 2 and due <= now:
+   436→                mastery = "due"  # 到期需要复习
+   437→            elif state == 3:
+   438→                mastery = "relearning"
+   439→            else:
+   440→                mastery = "unknown"
+   441→
+   442→            if word in words_learned:
+   443→                words_learned[word]["fsrs_mastery"] = mastery
+   444→                words_learned[word]["fsrs_reps"] = reps
+   445→                words_learned[word]["fsrs_difficulty"] = round(difficulty, 2)
+   446→                words_learned[word]["fsrs_scheduled_days"] = round(scheduled_days, 1)
+   447→            else:
+   448→                words_learned[word] = {
+   449→                    "attempts": 0, "best": 0, "avg": 0, "mastered": mastery == "mastered",
+   450→                    "source": "fsrs", "fsrs_mastery": mastery, "fsrs_reps": reps,
+   451→                    "fsrs_difficulty": round(difficulty, 2), "fsrs_scheduled_days": round(scheduled_days, 1),
+   452→                }
+   453→        conn3.close()
+   454→    except Exception as e:
+   455→        print(f"[统计] FSRS单词数据查询失败: {e}")
+   456→
+   457→    # 单词复习统计（合并 FSRS 和学习数据库的单词数据）
+   458→    word_review_stats = fsrs.get_word_review_stats(user_id)
+   459→
+   460→    # 补充：统计不在 FSRS 中但在 user_word_progress / user_word_errors 中的单词
+   461→    # 这些是用户练习过但没有 FSRS 卡片的单词
+   462→    fsrs_word_set = set()
+   463→    try:
+   464→        conn4 = sqlite3.connect(fsrs.db_path)
+   465→        fsrs_word_rows = conn4.execute(
+   466→            "SELECT card_id FROM cards WHERE card_type='word' AND user_id=?", (user_id,)
+   467→        ).fetchall()
+   468→        conn4.close()
+   469→        fsrs_word_set = {r[0].replace("word_", "", 1) for r in fsrs_word_rows}
+   470→    except Exception:
+   471→        pass
+   472→
+   473→    # 统计只有发音数据没有 FSRS 卡片的单词
+   474→    extra_mastered = 0
+   475→    extra_learning = 0
+   476→    extra_new = 0
+   477→    for word, info in words_learned.items():
+   478→        if word not in fsrs_word_set:
+   479→            if info.get("mastered", False) or info.get("best", 0) >= 80:
+   480→                extra_mastered += 1
+   481→            elif info.get("attempts", 0) > 0:
+   482→                extra_learning += 1
+   483→            else:
+   484→                extra_new += 1
+   485→
+   486→    # 合并统计
+   487→    word_review_stats["total"] = word_review_stats.get("total", 0) + len([w for w in words_learned if w not in fsrs_word_set])
+   488→    word_review_stats["mastered"] = word_review_stats.get("mastered", 0) + extra_mastered
+   489→    word_review_stats["learning"] = word_review_stats.get("learning", 0) + extra_learning
+   490→    # 重新计算 due = total - mastered - new（保持用户视角一致性）
+   491→    word_review_stats["due"] = word_review_stats["total"] - word_review_stats["mastered"] - word_review_stats.get("new", 0)
+   492→    if word_review_stats["due"] < 0:
+   493→        word_review_stats["due"] = 0
+   494→
+   495→    return {
+   496→        "total_practice": total_practice,
+   497→        "recent_scores": recent_scores,
+   498→        "error_phonemes": error_phonemes,
+   499→        "words_learned": words_learned,
+   500→        "analytics": analytics,
+   501→        "fsrs_stats": fsrs_stats,
+   502→        "word_review_stats": word_review_stats,
+   503→        "weakness": weakness,
+   504→    }
+   505→
+   506→
+   507→@app.post("/api/learning/record-evaluation")
+   508→async def learning_record_evaluation(data: dict, user: dict = Depends(get_current_user)):
+   509→    learning = get_learning_algorithm()
+   510→    try:
+   511→        learning.record_evaluation(
+   512→            user_id=user["id"],
+   513→            sentence_id=data.get("sentence_id", ""),
+   514→            overall_score=data.get("overall_score", 0),
+   515→            pronunciation_score=data.get("pronunciation_score", 0),
+   516→            completeness_score=data.get("completeness_score", 0),
+   517→            fluency_score=data.get("fluency_score", 0),
+   518→            errors=data.get("errors", []),
+   519→            word_scores=data.get("word_scores", []),
+   520→            duration=data.get("duration", 0),
+   521→        )
+   522→        return {"ok": True}
+   523→    except Exception as e:
+   524→        raise HTTPException(status_code=500, detail=str(e))
+   525→
+   526→
+   527→@app.get("/api/sentence")
+   528→async def get_random_sentence(force_new: bool = Query(False, description="强制获取新句子，跳过FSRS"), user: dict = Depends(get_current_user)):
+   529→    """获取练习句子（FSRS 优先，混合复习和新句子）"""
+   530→    user_id = user.get("id", "default")
+   531→
+   532→    if force_new:
+   533→        sentence = random.choice(PRESET_SENTENCES)
+   534→        result = await _enrich_sentence_async(sentence)
+   535→        _auto_register_words(sentence["text"], user_id)
+   536→        return result
+   537→
+   538→    try:
+   539→        fsrs = get_fsrs_db()
+   540→        queue = fsrs.get_review_queue(card_type="sentence", user_id=user_id, new_per_day=5)
+   541→
+   542→        if queue:
+   543→            review_cards = [q for q in queue if q["type"] == "review"]
+   544→            new_cards = [q for q in queue if q["type"] == "new"]
+   545→
+   546→            if review_cards:
+   547→                chosen = random.choice(review_cards)
+   548→                sentence = _find_sentence_by_card_id(chosen["card_id"])
+   549→                if sentence:
+   550→                    result = await _enrich_sentence_async(sentence)
+   551→                    result["fsrs"] = chosen
+   552→                    _auto_register_words(sentence["text"], user_id)
+   553→                    return result
+   554→
+   555→            if new_cards:
+   556→                chosen = random.choice(new_cards)
+   557→                sentence = _find_sentence_by_card_id(chosen["card_id"])
+   558→                if sentence:
+   559→                    result = await _enrich_sentence_async(sentence)
+   560→                    result["fsrs"] = chosen
+   561→                    _auto_register_words(sentence["text"], user_id)
+   562→                    return result
+   563→
+   564→        # 没有队列，选一个句子
+   565→        fsrs_card_ids = set()
+   566→        try:
+   567→            import sqlite3
+   568→            conn = sqlite3.connect(fsrs.db_path)
+   569→            rows = conn.execute("SELECT card_id FROM cards WHERE card_type='sentence' AND user_id=?", (user_id,)).fetchall()
+   570→            fsrs_card_ids = {r[0] for r in rows}
+   571→            conn.close()
+   572→        except Exception:
+   573→            pass
+   574→
+   575→        unregistered = [
+   576→            s for s in PRESET_SENTENCES
+   577→            if f"sentence_{s['id']}" not in fsrs_card_ids
+   578→        ]
+   579→        if unregistered:
+   580→            sentence = random.choice(unregistered)
+   581→            fsrs.ensure_card(f"sentence_{sentence['id']}", card_type="sentence", user_id=user_id)
+   582→            result = await _enrich_sentence_async(sentence)
+   583→            _auto_register_words(sentence["text"], user_id)
+   584→            return result
+   585→
+   586→    except Exception as e:
+   587→        print(f"[FSRS] 获取复习队列失败，回退到随机模式: {e}")
+   588→
+   589→    sentence = random.choice(PRESET_SENTENCES)
+   590→    result = await _enrich_sentence_async(sentence)
+   591→    _auto_register_words(sentence["text"], user_id)
+   592→    return result
+   593→
+   594→
+   595→@app.get("/api/sentences")
+   596→async def get_all_sentences():
+   597→    """获取所有练习句子（流式：只返回基本信息，不展开词典详情）"""
+   598→    return [
+   599→        {
+   600→            "id": s["id"],
+   601→            "text": s["text"],
+   602→            "translation": s.get("translation", ""),
+   603→            "difficulty": s.get("difficulty", "medium"),
+   604→            "category": s.get("category", "general"),
+   605→        }
+   606→        for s in PRESET_SENTENCES
+   607→    ]
+   608→
+   609→
+   610→@app.get("/api/sentence/{sentence_id}")
+   611→async def get_sentence_by_id(sentence_id: int):
+   612→    """按ID获取句子（完整详情）"""
+   613→    for s in PRESET_SENTENCES:
+   614→        if s["id"] == sentence_id:
+   615→            return await _enrich_sentence_async(s)
+   616→    raise HTTPException(status_code=404, detail="句子不存在")
+   617→
+   618→
+   619→@app.get("/api/minimal-pairs")
+   620→async def get_minimal_pairs():
+   621→    """获取最小对立对数据"""
+   622→    return MINIMAL_PAIRS
+   623→
+   624→
+   625→@app.get("/api/phoneme-tips")
+   626→async def get_phoneme_tips():
+   627→    """获取全部44个音素的发音指南"""
+   628→    result = {}
+   629→    for phoneme, info in PHONEME_TIPS.items():
+   630→        result[phoneme] = {
+   631→            "description": info["description"],
+   632→            "ipa": info.get("ipa", ARPABET_TO_IPA.get(phoneme, "")),
+   633→            "common_error": info["common_error"],
+   634→            "solution": info["solution"],
+   635→            "mouth_shape": info["mouth_shape"],
+   636→            "practice_words": info.get("practice_words", []),
+   637→        }
+   638→    return result
+   639→
+   640→
+   641→# ============================================================
+   642→# FSRS 间隔重复 API
+   643→# ============================================================
+   644→
+   645→@app.post("/api/fsrs/review")
+   646→async def fsrs_review(data: dict, user: dict = Depends(get_current_user)):
+   647→    card_id = data.get("card_id")
+   648→    rating = data.get("rating")
+   649→    card_type = data.get("card_type", "sentence")
+   650→    user_id = user.get("id", "default")
+   651→
+   652→    if not card_id:
+   653→        raise HTTPException(status_code=400, detail="缺少 card_id")
+   654→    if rating not in (1, 2, 3, 4):
+   655→        raise HTTPException(status_code=400, detail="rating 必须为 1-4")
+   656→
+   657→    try:
+   658→        fsrs = get_fsrs_db()
+   659→        result = fsrs.review_card(card_id, rating, card_type, user_id=user_id)
+   660→        return result
+   661→    except Exception as e:
+   662→        raise HTTPException(status_code=500, detail=f"复习记录失败: {str(e)}")
+   663→
+   664→
+   665→@app.get("/api/fsrs/queue")
+   666→async def fsrs_queue(card_type: str = Query("sentence"), new_per_day: int = Query(5), user: dict = Depends(get_current_user)):
+   667→    user_id = user.get("id", "default")
+   668→    try:
+   669→        fsrs = get_fsrs_db()
+   670→        queue = fsrs.get_review_queue(card_type=card_type, user_id=user_id, new_per_day=new_per_day)
+   671→        return {"queue": queue, "total": len(queue)}
+   672→    except Exception as e:
+   673→        raise HTTPException(status_code=500, detail=f"获取复习队列失败: {str(e)}")
+   674→
+   675→
+   676→@app.get("/api/fsrs/stats")
+   677→async def fsrs_stats(user: dict = Depends(get_current_user)):
+   678→    user_id = user.get("id", "default")
+   679→    try:
+   680→        fsrs = get_fsrs_db()
+   681→        fsrs_stats_data = fsrs.get_stats(user_id=user_id)
+   682→        # Also include learning analytics if available
+   683→        try:
+   684→            learning = get_learning_algorithm()
+   685→            analytics = learning.get_analytics(user_id)
+   686→            fsrs_stats_data["learning_analytics"] = analytics
+   687→        except Exception:
+   688→            pass
+   689→        return fsrs_stats_data
+   690→    except Exception as e:
+   691→        raise HTTPException(status_code=500, detail=f"获取统计失败: {str(e)}")
+   692→
+   693→
+   694→@app.get("/api/fsrs/next")
+   695→async def fsrs_next(card_type: str = Query("sentence"), user: dict = Depends(get_current_user)):
+   696→    user_id = user.get("id", "default")
+   697→    try:
+   698→        fsrs = get_fsrs_db()
+   699→        queue = fsrs.get_review_queue(card_type=card_type, user_id=user_id, new_per_day=5)
+   700→
+   701→        if queue:
+   702→            review_cards = [q for q in queue if q["type"] == "review"]
+   703→            new_cards = [q for q in queue if q["type"] == "new"]
+   704→
+   705→            chosen = None
+   706→            sentence_type = "new"
+   707→            if review_cards:
+   708→                chosen = random.choice(review_cards)
+   709→                sentence_type = "review"
+   710→            elif new_cards:
+   711→                chosen = random.choice(new_cards)
+   712→
+   713→            if chosen:
+   714→                sentence = _find_sentence_by_card_id(chosen["card_id"])
+   715→                if sentence:
+   716→                    result = await _enrich_sentence_async(sentence)
+   717→                    result["fsrs"] = chosen
+   718→                    return {"sentence": result, "type": sentence_type}
+   719→
+   720→        sentence = random.choice(PRESET_SENTENCES)
+   721→        result = await _enrich_sentence_async(sentence)
+   722→        return {"sentence": result, "type": "new"}
+   723→
+   724→    except Exception:
+   725→        sentence = random.choice(PRESET_SENTENCES)
+   726→        result = await _enrich_sentence_async(sentence)
+   727→        return {"sentence": result, "type": "new"}
+   728→
+   729→
+   730→@app.get("/api/fsrs/due-count")
+   731→async def fsrs_due_count(card_type: str = Query("sentence"), user: dict = Depends(get_current_user)):
+   732→    """获取到期复习数量
+   733→    
+   734→    返回多种计数：
+   735→    - count: 严格FSRS到期数（state!=NEW 且 due<=now）
+   736→    - pending_count: 待复习数（非NEW且非已掌握，不含新词）
+   737→    - total_reviewable: 可练习总数（新词+待复习，不含已掌握）
+   738→    - new_count: 新卡片数
+   739→    """
+   740→    user_id = user.get("id", "default")
+   741→    try:
+   742→        fsrs = get_fsrs_db()
+   743→        due_count = fsrs.get_due_count(card_type=card_type, user_id=user_id)
+   744→        new_count = fsrs.get_new_card_count(card_type=card_type, user_id=user_id)
+   745→        pending_count = fsrs.get_pending_review_count(card_type=card_type, user_id=user_id)
+   746→        total_reviewable = fsrs.get_total_reviewable_count(card_type=card_type, user_id=user_id)
+   747→        return {
+   748→            "count": due_count, 
+   749→            "new_count": new_count, 
+   750→            "total_due": due_count, 
+   751→            "pending_count": pending_count,
+   752→            "total_reviewable": total_reviewable,
+   753→        }
+   754→    except Exception:
+   755→        return {"count": 0, "new_count": 0, "total_due": 0, "pending_count": 0, "total_reviewable": 0}
+   756→
+   757→
+   758→@app.post("/api/fsrs/ensure")
+   759→async def fsrs_ensure(data: dict, user: dict = Depends(get_current_user)):
+   760→    card_ids = data.get("card_ids", [])
+   761→    card_type = data.get("card_type", "sentence")
+   762→    user_id = user.get("id", "default")
+   763→
+   764→    if not card_ids:
+   765→        raise HTTPException(status_code=400, detail="缺少 card_ids")
+   766→
+   767→    try:
+   768→        fsrs = get_fsrs_db()
+   769→        created = []
+   770→        for card_id in card_ids:
+   771→            fsrs.ensure_card(card_id, card_type, user_id=user_id)
+   772→            created.append(card_id)
+   773→        return {"created": created, "total": len(created)}
+   774→    except Exception as e:
+   775→        raise HTTPException(status_code=500, detail=f"创建卡片失败: {str(e)}")
+   776→
+   777→
+   778→# ============================================================
+   779→# 学习模式 API
+   780→# ============================================================
+   781→
+   782→@app.get("/api/mode/sequential/next")
+   783→async def mode_sequential_next(
+   784→    start_id: Optional[int] = Query(None, description="起始句子ID（1-indexed，句子的id字段）"),
+   785→    end_id: Optional[int] = Query(None, description="结束句子ID"),
+   786→    user: dict = Depends(get_current_user),
+   787→):
+   788→    """顺序模式：严格按JSON文件ID顺序获取下一个句子
+   789→    
+   790→    顺序模式不因 FSRS 到期复习打断，FSRS 只在后台记录进度。
+   791→    当用户主动评级时，FSRS 会在智能模式中发挥作用。
+   792→    支持通过 start_id/end_id 指定ID范围。
+   793→    """
+   794→    user_id = user.get("id", "default")
+   795→    learning = get_learning_algorithm()
+   796→    fsrs = get_fsrs_db()
+   797→    current_count = len(PRESET_SENTENCES)
+   798→
+   799→    # 0. 数据变化检测
+   800→    pos_info = learning.get_sequential_position(user_id)
+   801→    stored_count = pos_info.get("sentences_count", 0)
+   802→    data_changed = False
+   803→    if stored_count > 0 and stored_count != current_count:
+   804→        data_changed = True
+   805→
+   806→    # 1. 确定有效的 start_id / end_id
+   807→    effective_start = start_id if start_id is not None else pos_info.get("start_id")
+   808→    effective_end = end_id if end_id is not None else pos_info.get("end_id")
+   809→
+   810→    # 2. 顺序获取下一个句子（严格按顺序，不被 FSRS 打断）
+   811→    if effective_start is not None or effective_end is not None:
+   812→        # 使用 ID 范围过滤
+   813→        filtered = [s for s in PRESET_SENTENCES]
+   814→        if effective_start is not None:
+   815→            filtered = [s for s in filtered if s.get("id", 0) >= effective_start]
+   816→        if effective_end is not None:
+   817→            filtered = [s for s in filtered if s.get("id", 0) <= effective_end]
+   818→
+   819→        if not filtered:
+   820→            raise HTTPException(status_code=404, detail="指定ID范围内没有句子")
+   821→
+   822→        # 用存储的位置在过滤后的列表中找句子
+   823→        pos = pos_info.get("position", 0)
+   824→        
+   825→        # 如果数据变化了，不自动前进，返回提示
+   826→        if data_changed:
+   827→            sentence = filtered[0]
+   828→            result = await _enrich_sentence_async(sentence)
+   829→            return {
+   830→                "sentence": result,
+   831→                "type": "new",
+   832→                "mode": "sequential",
+   833→                "data_changed": True,
+   834→                "position": 0,
+   835→                "total": len(filtered),
+   836→                "message": "句子数据已变更，请确认起始位置",
+   837→            }
+   838→
+   839→        # 在过滤列表中找到当前应该的句子
+   840→        if pos < len(filtered):
+   841→            sentence = filtered[pos]
+   842→        else:
+   843→            pos = 0
+   844→            sentence = filtered[0]
+   845→
+   846→        # 更新位置（在过滤列表中的位置+1）
+   847→        next_pos = pos + 1
+   848→        if next_pos >= len(filtered):
+   849→            next_pos = 0  # 循环
+   850→        learning.set_sequential_position(
+   851→            user_id, next_pos, sentences_count=current_count,
+   852→            start_id=effective_start, end_id=effective_end
+   853→        )
+   854→
+   855→        # 确保 FSRS 卡片存在
+   856→        fsrs.ensure_card(f"sentence_{sentence['id']}", card_type="sentence", user_id=user_id)
+   857→
+   858→        # 获取 FSRS 卡片信息（如果有）
+   859→        card_info = fsrs.get_card_info(f"sentence_{sentence['id']}", user_id)
+   860→
+   861→        result = await _enrich_sentence_async(sentence)
+   862→        if card_info:
+   863→            result["fsrs"] = card_info
+   864→        _auto_register_words(sentence["text"], user_id)
+   865→        return {
+   866→            "sentence": result,
+   867→            "type": "new",
+   868→            "mode": "sequential",
+   869→            "position": pos,
+   870→            "total": len(filtered),
+   871→            "data_changed": False,
+   872→            "start_id": effective_start,
+   873→            "end_id": effective_end,
+   874→        }
+   875→    else:
+   876→        # 原有逻辑：使用列表位置
+   877→        pos = pos_info.get("position", 0)
+   878→
+   879→        # 如果数据变化了，不自动前进
+   880→        if data_changed:
+   881→            if pos >= current_count:
+   882→                pos = 0
+   883→            sentence = PRESET_SENTENCES[pos]
+   884→            result = await _enrich_sentence_async(sentence)
+   885→            _auto_register_words(sentence["text"], user_id)
+   886→            return {
+   887→                "sentence": result,
+   888→                "type": "new",
+   889→                "mode": "sequential",
+   890→                "data_changed": True,
+   891→                "position": pos,
+   892→                "total": current_count,
+   893→                "message": "句子数据已变更，请确认起始位置",
+   894→            }
+   895→
+   896→        if pos >= current_count:
+   897→            pos = 0  # 循环
+   898→
+   899→        sentence = PRESET_SENTENCES[pos]
+   900→        next_pos = pos + 1
+   901→        learning.set_sequential_position(user_id, next_pos, sentences_count=current_count)
+   902→
+   903→        # 确保 FSRS 卡片存在
+   904→        fsrs.ensure_card(f"sentence_{sentence['id']}", card_type="sentence", user_id=user_id)
+   905→
+   906→        # 获取 FSRS 卡片信息
+   907→        card_info = fsrs.get_card_info(f"sentence_{sentence['id']}", user_id)
+   908→
+   909→        result = await _enrich_sentence_async(sentence)
+   910→        if card_info:
+   911→            result["fsrs"] = card_info
+   912→        _auto_register_words(sentence["text"], user_id)
+   913→        return {
+   914→            "sentence": result,
+   915→            "type": "new",
+   916→            "mode": "sequential",
+   917→            "position": pos,
+   918→            "total": current_count,
+   919→            "data_changed": False,
+   920→        }
+   921→
+   922→
+   923→@app.post("/api/mode/sequential/set-range")
+   924→async def mode_sequential_set_range(data: dict, user: dict = Depends(get_current_user)):
+   925→    """设置顺序模式的ID范围（或从某个ID开始）
+   926→
+   927→    请求体：
+   928→    - start_id: 起始句子ID（1-indexed，句子的id字段），必填
+   929→    - end_id: 结束句子ID，可选（默认到最后一个句子）
+   930→    """
+   931→    user_id = user.get("id", "default")
+   932→    start_id = data.get("start_id")
+   933→    end_id = data.get("end_id")
+   934→
+   935→    if start_id is None:
+   936→        raise HTTPException(status_code=400, detail="缺少 start_id")
+   937→
+   938→    learning = get_learning_algorithm()
+   939→    result = learning.set_sequential_range(user_id, start_id, end_id, PRESET_SENTENCES)
+   940→
+   941→    # 确保 FSRS 卡片存在
+   942→    fsrs = get_fsrs_db()
+   943→    start_sentence = None
+   944→    for s in PRESET_SENTENCES:
+   945→        if s.get("id") == start_id:
+   946→            start_sentence = s
+   947→            break
+   948→
+   949→    if start_sentence:
+   950→        fsrs.ensure_card(f"sentence_{start_sentence['id']}", card_type="sentence", user_id=user_id)
+   951→
+   952→    return {
+   953→        "ok": True,
+   954→        "position": result["position"],
+   955→        "start_id": result["start_id"],
+   956→        "end_id": result["end_id"],
+   957→        "sentences_count": result["sentences_count"],
+   958→        "message": f"顺序模式已设置为从ID {start_id}开始" + (f" 到ID {end_id}" if end_id else ""),
+   959→    }
+   960→
+   961→
+   962→@app.get("/api/mode/smart/next")
+   963→async def mode_smart_next(user: dict = Depends(get_current_user)):
+   964→    """智能模式：基于薄弱分析和FSRS复习历史推荐句子（增强版）"""
+   965→    user_id = user.get("id", "default")
+   966→    learning = get_learning_algorithm()
+   967→    fsrs = get_fsrs_db()
+   968→
+   969→    # 1. 优先复习到期卡片（使用评分函数排序）
+   970→    due_cards = fsrs.get_due_cards(card_type="sentence", user_id=user_id, limit=20)
+   971→    if due_cards:
+   972→        # Score each due card's sentence using the smart recommendation score
+   973→        scored_cards = []
+   974→        for card in due_cards:
+   975→            sentence = _find_sentence_by_card_id(card["card_id"])
+   976→            if sentence:
+   977→                score = learning.get_smart_recommendation_score(user_id, sentence, PRESET_SENTENCES)
+   978→                scored_cards.append((score, card, sentence))
+   979→
+   980→        if scored_cards:
+   981→            # Sort by score descending - pick the highest-scored sentence
+   982→            scored_cards.sort(key=lambda x: -x[0])
+   983→            # Pick from top 3 with some randomness for variety
+   984→            top_n = min(3, len(scored_cards))
+   985→            chosen_idx = random.randint(0, top_n - 1)
+   986→            chosen_score, chosen_card, chosen_sentence = scored_cards[chosen_idx]
+   987→            result = await _enrich_sentence_async(chosen_sentence)
+   988→            result["fsrs"] = chosen_card
+   989→            result["smart_score"] = round(chosen_score, 2)
+   990→            _auto_register_words(chosen_sentence["text"], user_id)
+   991→            return {"sentence": result, "type": "review", "mode": "smart"}
+   992→
+   993→    # 2. 自适应推荐新句子（使用评分函数排序候选句子）
+   994→    weakness = learning.get_weakness_profile(user_id)
+   995→    difficulty = weakness.get("difficulty_level", "medium")
+   996→
+   997→    # Filter sentences by difficulty
+   998→    difficulty_map = {"easy": ["easy"], "medium": ["easy", "medium"], "hard": ["medium", "hard"]}
+   999→    target_diffs = difficulty_map.get(difficulty, ["medium"])
+  1000→    matching = [s for s in PRESET_SENTENCES if s.get("difficulty", "medium") in target_diffs]
+  1001→    if not matching:
+  1002→        matching = PRESET_SENTENCES
+  1003→
+  1004→    # Score all matching sentences and pick the best
+  1005→    scored_sentences = []
+  1006→    for s in matching:
+  1007→        score = learning.get_smart_recommendation_score(user_id, s, PRESET_SENTENCES)
+  1008→        scored_sentences.append((score, s))
+  1009→
+  1010→    if scored_sentences:
+  1011→        scored_sentences.sort(key=lambda x: -x[0])
+  1012→        # Pick from top 5 with some randomness
+  1013→        top_n = min(5, len(scored_sentences))
+  1014→        chosen_idx = random.randint(0, top_n - 1)
+  1015→        chosen_score, chosen_sentence = scored_sentences[chosen_idx]
+  1016→        fsrs.ensure_card(f"sentence_{chosen_sentence['id']}", card_type="sentence", user_id=user_id)
+  1017→        enriched = await _enrich_sentence_async(chosen_sentence)
+  1018→        enriched["smart_score"] = round(chosen_score, 2)
+  1019→        _auto_register_words(chosen_sentence["text"], user_id)
+  1020→        return {"sentence": enriched, "type": "new", "mode": "smart"}
+  1021→
+  1022→    # 3. Fallback
+  1023→    sentence = random.choice(PRESET_SENTENCES)
+  1024→    enriched = await _enrich_sentence_async(sentence)
+  1025→    _auto_register_words(sentence["text"], user_id)
+  1026→    return {"sentence": enriched, "type": "new", "mode": "smart"}
+  1027→
+  1028→
+  1029→@app.get("/api/mode/status")
+  1030→async def mode_status(user: dict = Depends(get_current_user)):
+  1031→    """获取当前学习模式状态（增强版：包含数据变更检测和智能模式信息）"""
+  1032→    user_id = user.get("id", "default")
+  1033→    learning = get_learning_algorithm()
+  1034→    fsrs = get_fsrs_db()
+  1035→    current_count = len(PRESET_SENTENCES)
+  1036→
+  1037→    pos_info = learning.get_sequential_position(user_id)
+  1038→    pos = pos_info.get("position", 0)
+  1039→    stored_count = pos_info.get("sentences_count", 0)
+  1040→    start_id = pos_info.get("start_id")
+  1041→    end_id = pos_info.get("end_id")
+  1042→    data_changed = stored_count > 0 and stored_count != current_count
+  1043→
+  1044→    due_count = len(fsrs.get_due_cards(card_type="sentence", user_id=user_id))
+  1045→    error_words = learning.get_error_words(user_id)
+  1046→    word_due = len(fsrs.get_due_cards(card_type="word", user_id=user_id))
+  1047→
+  1048→    # Smart mode info
+  1049→    weakness = learning.get_weakness_profile(user_id)
+  1050→    smart_mode_info = {
+  1051→        "difficulty_level": weakness.get("difficulty_level", "medium"),
+  1052→        "phoneme_weakness_count": len(weakness.get("phoneme_weaknesses", [])),
+  1053→        "word_weakness_count": len(weakness.get("word_weaknesses", [])),
+  1054→        "error_word_count": len(error_words),
+  1055→    }
+  1056→
+  1057→    return {
+  1058→        "sequential_position": pos,
+  1059→        "sequential_total": current_count,
+  1060→        "due_reviews": due_count,
+  1061→        "error_word_count": len(error_words),
+  1062→        "word_due_count": word_due,
+  1063→        "sentences_count": current_count,
+  1064→        "stored_sentences_count": stored_count,
+  1065→        "data_changed": data_changed,
+  1066→        "start_id": start_id,
+  1067→        "end_id": end_id,
+  1068→        "smart_mode_info": smart_mode_info,
+  1069→    }
+  1070→
+  1071→
+  1072→# ============================================================
+  1073→# 单词复习 API（FSRS 逐个推荐）
+  1074→# ============================================================
+  1075→
+  1076→@app.get("/api/words/review-queue")
+  1077→async def words_review_queue(limit: int = Query(20, description="每次复习单词数量"), user: dict = Depends(get_current_user)):
+  1078→    """获取单词复习队列（FSRS 逐个推荐 + 错误单词补充）
+  1079→    
+  1080→    策略：
+  1081→    1. FSRS 到期复习单词优先
+  1082→    2. 新单词（错误单词）补充
+  1083→    3. 每次最多 limit 个（默认20）
+  1084→    4. 每个单词包含 FSRS 状态、掌握度、错误次数等信息
+  1085→    """
+  1086→    user_id = user.get("id", "default")
+  1087→    learning = get_learning_algorithm()
+  1088→    fsrs = get_fsrs_db()
+  1089→    dict_svc = get_dict_service()
+  1090→
+  1091→    now = time.time()
+  1092→    seen = set()
+  1093→    queue = []
+  1094→
+  1095→    # 1. FSRS 到期的复习单词
+  1096→    due_word_cards = fsrs.get_due_cards(card_type="word", user_id=user_id, limit=limit)
+  1097→    for card in due_word_cards:
+  1098→        word = card["card_id"].replace("word_", "", 1)
+  1099→        if word not in seen:
+  1100→            seen.add(word)
+  1101→            word_detail = dict_svc.lookup(word, local_only=True)
+  1102→            queue.append({
+  1103→                "word": word,
+  1104→                "type": "review",
+  1105→                "card_id": card["card_id"],
+  1106→                "fsrs_state": card["state_name"],
+  1107→                "fsrs_difficulty": card.get("difficulty", 0),
+  1108→                "fsrs_stability": card.get("stability", 0),
+  1109→                "fsrs_reps": card.get("reps", 0),
+  1110→                "fsrs_scheduled_days": card.get("scheduled_days", 0),
+  1111→                **_build_word_detail(word, word_detail),
+  1112→            })
+  1113→
+  1114→    # 2. 错误单词（按错误次数排序，不重复）
+  1115→    if len(queue) < limit:
+  1116→        error_words = learning.get_error_words(user_id)
+  1117→        for ew in error_words:
+  1118→            if len(queue) >= limit:
+  1119→                break
+  1120→            word = ew["word"]
+  1121→            if word not in seen:
+  1122→                seen.add(word)
+  1123→                card_id = f"word_{word}"
+  1124→                fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
+  1125→                card_info = fsrs.get_card_info(card_id, user_id)
+  1126→                word_detail = dict_svc.lookup(word, local_only=True)
+  1127→                queue.append({
+  1128→                    "word": word,
+  1129→                    "type": "new",
+  1130→                    "card_id": card_id,
+  1131→                    "dictation_errors": ew.get("dictation_errors", 0),
+  1132→                    "pronunciation_errors": ew.get("pronunciation_errors", 0),
+  1133→                    "total_errors": ew.get("total_errors", 0),
+  1134→                    "fsrs_state": card_info.get("state_name", "new") if card_info else "new",
+  1135→                    "fsrs_difficulty": card_info.get("difficulty", 0) if card_info else 0,
+  1136→                    "fsrs_reps": card_info.get("reps", 0) if card_info else 0,
+  1137→                    **_build_word_detail(word, word_detail),
+  1138→                })
+  1139→
+  1140→    # 3. 如果还不够，从新卡片中补充
+  1141→    if len(queue) < limit:
+  1142→        new_card_ids = fsrs.get_new_cards(card_type="word", user_id=user_id, limit=limit - len(queue))
+  1143→        for card_id in new_card_ids:
+  1144→            word = card_id.replace("word_", "", 1)
+  1145→            if word not in seen:
+  1146→                seen.add(word)
+  1147→                word_detail = dict_svc.lookup(word, local_only=True)
+  1148→                queue.append({
+  1149→                    "word": word,
+  1150→                    "type": "new",
+  1151→                    "card_id": card_id,
+  1152→                    "fsrs_state": "new",
+  1153→                    "fsrs_difficulty": 0,
+  1154→                    "fsrs_reps": 0,
+  1155→                    **_build_word_detail(word, word_detail),
+  1156→                })
+  1157→
+  1158→    # 获取复习统计
+  1159→    review_stats = fsrs.get_word_review_stats(user_id)
+  1160→
+  1161→    return {
+  1162→        "queue": queue,
+  1163→        "total": len(queue),
+  1164→        "review_stats": review_stats,
+  1165→    }
+  1166→
+  1167→
+  1168→@app.get("/api/words/next-review")
+  1169→async def words_next_review(user: dict = Depends(get_current_user)):
+  1170→    """获取下一个需要复习的单词（FSRS 推荐，一次一个）
+  1171→    
+  1172→    返回单个单词的完整信息，包含：
+  1173→    - FSRS 状态、掌握度、可回忆率
+  1174→    - 词典信息（音标、释义）
+  1175→    - 错误记录（听写/发音错误次数）
+  1176→    """
+  1177→    user_id = user.get("id", "default")
+  1178→    fsrs = get_fsrs_db()
+  1179→    learning = get_learning_algorithm()
+  1180→    dict_svc = get_dict_service()
+  1181→
+  1182→    # FSRS 推荐下一个
+  1183→    next_card = fsrs.get_next_word_for_review(user_id)
+  1184→    if not next_card:
+  1185→        return {"word": None, "message": "暂无需要复习的单词"}
+  1186→
+  1187→    word = next_card["card_id"].replace("word_", "", 1)
+  1188→    word_detail = dict_svc.lookup(word, local_only=True)
+  1189→
+  1190→    # 获取错误记录
+  1191→    error_words = learning.get_error_words(user_id)
+  1192→    error_info = next((ew for ew in error_words if ew["word"] == word), None)
+  1193→
+  1194→    # 获取 FSRS 详细信息
+  1195→    card_info = fsrs.get_card_info(next_card["card_id"], user_id)
+  1196→
+  1197→    # 获取复习统计
+  1198→    review_stats = fsrs.get_word_review_stats(user_id)
+  1199→
+  1200→    result = {
+  1201→        "word": word,
+  1202→        "type": next_card["type"],
+  1203→        "card_id": next_card["card_id"],
+  1204→        "fsrs_state": next_card.get("state_name", "new"),
+  1205→        "fsrs_difficulty": next_card.get("difficulty", 0),
+  1206→        "fsrs_stability": next_card.get("stability", 0),
+  1207→        "fsrs_reps": next_card.get("reps", 0),
+  1208→        "fsrs_scheduled_days": next_card.get("scheduled_days", 0),
+  1209→        "dictation_errors": error_info.get("dictation_errors", 0) if error_info else 0,
+  1210→        "pronunciation_errors": error_info.get("pronunciation_errors", 0) if error_info else 0,
+  1211→        "total_errors": error_info.get("total_errors", 0) if error_info else 0,
+  1212→        "review_stats": review_stats,
+  1213→        **_build_word_detail(word, word_detail),
+  1214→    }
+  1215→
+  1216→    if card_info:
+  1217→        result["fsrs_retrievability"] = card_info.get("retrievability", 0)
+  1218→        result["fsrs_last_review"] = card_info.get("last_review", 0)
+  1219→
+  1220→    return result
+  1221→
+  1222→
+  1223→@app.post("/api/words/review")
+  1224→async def words_review_rate(data: dict, user: dict = Depends(get_current_user)):
+  1225→    """单词复习评级（4级：1=没印象, 2=难, 3=模糊, 4=掌握）"""
+  1226→    word = data.get("word")
+  1227→    rating = data.get("rating")  # 1-4
+  1228→    user_id = user.get("id", "default")
+  1229→
+  1230→    if not word:
+  1231→        raise HTTPException(status_code=400, detail="缺少 word")
+  1232→    if rating not in (1, 2, 3, 4):
+  1233→        raise HTTPException(status_code=400, detail="rating 必须为 1-4")
+  1234→
+  1235→    card_id = f"word_{word}"
+  1236→    fsrs = get_fsrs_db()
+  1237→    fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
+  1238→    result = fsrs.review_card(card_id, rating, card_type="word", user_id=user_id)
+  1239→
+  1240→    # If mastered (rating 4), optionally reduce error count
+  1241→    if rating >= 3:
+  1242→        learning = get_learning_algorithm()
+  1243→        import sqlite3 as _sql
+  1244→        conn = _sql.connect(learning.db_path)
+  1245→        conn.execute(
+  1246→            "UPDATE user_word_errors SET count = MAX(0, count - 1) WHERE user_id = ? AND word = ?",
+  1247→            (user_id, word)
+  1248→        )
+  1249→        conn.commit()
+  1250→        conn.close()
+  1251→
+  1252→    return result
+  1253→
+  1254→
+  1255→@app.get("/api/words/errors")
+  1256→async def words_errors(user: dict = Depends(get_current_user)):
+  1257→    """获取所有错误单词"""
+  1258→    user_id = user.get("id", "default")
+  1259→    learning = get_learning_algorithm()
+  1260→    error_words = learning.get_error_words(user_id)
+  1261→
+  1262→    # Enrich with dictionary data
+  1263→    dict_svc = get_dict_service()
+  1264→    for ew in error_words:
+  1265→        word = ew["word"]
+  1266→        word_detail = dict_svc.lookup(word, local_only=True)
+  1267→        ew["ipa"] = word_detail.get("ipa", "")
+  1268→        ew["meaning"] = word_detail.get("meaning", "")
+  1269→        ew["pos"] = word_detail.get("pos", "")
+  1270→
+  1271→    return {"words": error_words, "total": len(error_words)}
+  1272→
+  1273→
+  1274→@app.get("/api/words/error-stats")
+  1275→async def words_error_stats(user: dict = Depends(get_current_user)):
+  1276→    """获取单词错误统计（按类型分组，含FSRS状态）
+  1277→    
+  1278→    返回：
+  1279→    - pronunciation_errors: 经常读错的单词列表
+  1280→    - dictation_errors: 经常听写错的单词列表
+  1281→    - summary: 总体统计
+  1282→    """
+  1283→    user_id = user.get("id", "default")
+  1284→    learning = get_learning_algorithm()
+  1285→    fsrs = get_fsrs_db()
+  1286→    dict_svc = get_dict_service()
+  1287→
+  1288→    all_errors = learning.get_error_words(user_id)
+  1289→    pron_errors = []
+  1290→    dict_errors = []
+  1291→
+  1292→    for ew in all_errors:
+  1293→        word = ew["word"]
+  1294→        card_id = f"word_{word}"
+  1295→        fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
+  1296→        card_info = fsrs.get_card_info(card_id, user_id)
+  1297→        word_detail = dict_svc.lookup(word, local_only=True)
+  1298→
+  1299→        entry = {
+  1300→            "word": word,
+  1301→            "ipa": word_detail.get("ipa", ""),
+  1302→            "meaning": word_detail.get("meaning", ""),
+  1303→            "pos": word_detail.get("pos", ""),
+  1304→            "fsrs_state": card_info.get("state_name", "new") if card_info else "new",
+  1305→            "fsrs_reps": card_info.get("reps", 0) if card_info else 0,
+  1306→            "fsrs_scheduled_days": card_info.get("scheduled_days", 0) if card_info else 0,
+  1307→        }
+  1308→
+  1309→        if ew.get("pronunciation_errors", 0) > 0:
+  1310→            entry["pronunciation_errors"] = ew["pronunciation_errors"]
+  1311→            pron_errors.append(entry)
+  1312→
+  1313→        if ew.get("dictation_errors", 0) > 0:
+  1314→            entry["dictation_errors"] = ew["dictation_errors"]
+  1315→            dict_errors.append(entry)
+  1316→
+  1317→    # Sort by error count descending
+  1318→    pron_errors.sort(key=lambda x: x.get("pronunciation_errors", 0), reverse=True)
+  1319→    dict_errors.sort(key=lambda x: x.get("dictation_errors", 0), reverse=True)
+  1320→
+  1321→    return {
+  1322→        "pronunciation_errors": pron_errors,
+  1323→        "dictation_errors": dict_errors,
+  1324→        "summary": {
+  1325→            "total_pron_errors": len(pron_errors),
+  1326→            "total_dict_errors": len(dict_errors),
+  1327→            "total_unique_errors": len(all_errors),
+  1328→        }
+  1329→    }
+  1330→
+  1331→
+  1332→@app.get("/api/words/practice-next")
+  1333→async def words_practice_next(mode: str = Query("all", description="练习模式: all/pronunciation/dictation"), user: dict = Depends(get_current_user)):
+  1334→    """获取下一个练习单词（FSRS自动推荐，支持按错误类型过滤）
+  1335→    
+  1336→    与 /api/words/next-review 的区别：
+  1337→    - 新词也算可练习（不只是到期复习）
+  1338→    - 加权随机：新词70% + 到期复习30%
+  1339→    - 无手动评级，由后续评分自动FSRS评级
+  1340→    - 包含TTS可用性、错误统计等完整信息
+  1341→    
+  1342→    mode 参数：
+  1343→    - all: 所有未掌握单词（默认）
+  1344→    - pronunciation: 仅读错过的单词
+  1345→    - dictation: 仅听写错过的单词
+  1346→    """
+  1347→    user_id = user.get("id", "default")
+  1348→    fsrs = get_fsrs_db()
+  1349→    learning = get_learning_algorithm()
+  1350→    dict_svc = get_dict_service()
+  1351→
+  1352→    if mode == "pronunciation" or mode == "dictation":
+  1353→        # 错误词优先模式：只从错误词中选择
+  1354→        error_type = "pronunciation" if mode == "pronunciation" else "dictation"
+  1355→        all_errors = learning.get_error_words(user_id)
+  1356→        
+  1357→        # 过滤对应类型的错误词
+  1358→        if error_type == "pronunciation":
+  1359→            error_words = [ew for ew in all_errors if ew.get("pronunciation_errors", 0) > 0]
+  1360→        else:
+  1361→            error_words = [ew for ew in all_errors if ew.get("dictation_errors", 0) > 0]
+  1362→        
+  1363→        if not error_words:
+  1364→            return {"word": None, "message": f"暂无{'读错' if mode == 'pronunciation' else '听写错误'}的单词", "total_reviewable": 0, "review_stats": fsrs.get_word_review_stats(user_id)}
+  1365→        
+  1366→        # 按错误次数排序（多的优先），然后按 FSRS 状态（未掌握优先）
+  1367→        # 为每个错误词确保有 FSRS 卡片并获取状态
+  1368→        error_word_data = []
+  1369→        for ew in error_words:
+  1370→            word = ew["word"]
+  1371→            card_id = f"word_{word}"
+  1372→            fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
+  1373→            card_info = fsrs.get_card_info(card_id, user_id)
+  1374→            
+  1375→            # 跳过已掌握的
+  1376→            if card_info and card_info["state"] == 2 and card_info["scheduled_days"] >= 3:
+  1377→                continue
+  1378→            
+  1379→            error_word_data.append({
+  1380→                "word": word,
+  1381→                "card_info": card_info,
+  1382→                "errors": ew.get(f"{error_type}_errors", 0),
+  1383→            })
+  1384→        
+  1385→        if not error_word_data:
+  1386→            return {"word": None, "message": f"所有{'读错' if mode == 'pronunciation' else '听写错误'}的单词已掌握", "total_reviewable": 0, "review_stats": fsrs.get_word_review_stats(user_id)}
+  1387→        
+  1388→        # 排序：错误次数多 > FSRS难度高 > 复习次数少
+  1389→        error_word_data.sort(key=lambda x: (-x["errors"], -(x["card_info"].get("difficulty", 0) if x["card_info"] else 0), x["card_info"].get("reps", 0) if x["card_info"] else 0))
+  1390→        
+  1391→        # 从前5个中随机选一个（避免太单调）
+  1392→        top_n = min(5, len(error_word_data))
+  1393→        chosen = random.choice(error_word_data[:top_n])
+  1394→        
+  1395→        word = chosen["word"]
+  1396→        word_detail = dict_svc.lookup(word, local_only=True)
+  1397→        card_info = chosen["card_info"]
+  1398→        error_info = next((ew for ew in all_errors if ew["word"] == word), None)
+  1399→        
+  1400→        review_stats = fsrs.get_word_review_stats(user_id)
+  1401→        total_reviewable = len(error_word_data)
+  1402→        
+  1403→        result = {
+  1404→            "word": word,
+  1405→            "type": "error_review",
+  1406→            "card_id": f"word_{word}",
+  1407→            "fsrs_state": card_info.get("state_name", "new") if card_info else "new",
+  1408→            "fsrs_difficulty": card_info.get("difficulty", 0) if card_info else 0,
+  1409→            "fsrs_stability": card_info.get("stability", 0) if card_info else 0,
+  1410→            "fsrs_reps": card_info.get("reps", 0) if card_info else 0,
+  1411→            "fsrs_scheduled_days": card_info.get("scheduled_days", 0) if card_info else 0,
+  1412→            "fsrs_retrievability": card_info.get("retrievability", 0) if card_info else 0,
+  1413→            "dictation_errors": error_info.get("dictation_errors", 0) if error_info else 0,
+  1414→            "pronunciation_errors": error_info.get("pronunciation_errors", 0) if error_info else 0,
+  1415→            "total_errors": error_info.get("total_errors", 0) if error_info else 0,
+  1416→            "review_stats": review_stats,
+  1417→            "total_reviewable": total_reviewable,
+  1418→            **_build_word_detail(word, word_detail),
+  1419→        }
+  1420→        return result
+  1421→
+  1422→    # 默认模式：所有未掌握单词
+  1423→    next_card = fsrs.get_next_word_for_practice(user_id)
+  1424→    if not next_card:
+  1425→        return {"word": None, "message": "暂无可练习的单词", "total_reviewable": 0, "review_stats": fsrs.get_word_review_stats(user_id)}
+  1426→
+  1427→    word = next_card["card_id"].replace("word_", "", 1)
+  1428→    word_detail = dict_svc.lookup(word, local_only=True)
+  1429→    card_info = fsrs.get_card_info(next_card["card_id"], user_id)
+  1430→
+  1431→    # 获取错误记录
+  1432→    error_words = learning.get_error_words(user_id)
+  1433→    error_info = next((ew for ew in error_words if ew["word"] == word), None)
+  1434→
+  1435→    # 练习统计
+  1436→    review_stats = fsrs.get_word_review_stats(user_id)
+  1437→    total_reviewable = fsrs.get_total_reviewable_count("word", user_id)
+  1438→
+  1439→    result = {
+  1440→        "word": word,
+  1441→        "type": next_card["type"],
+  1442→        "card_id": next_card["card_id"],
+  1443→        "fsrs_state": next_card.get("state_name", "new"),
+  1444→        "fsrs_difficulty": next_card.get("difficulty", 0),
+  1445→        "fsrs_stability": next_card.get("stability", 0),
+  1446→        "fsrs_reps": next_card.get("reps", 0),
+  1447→        "fsrs_scheduled_days": next_card.get("scheduled_days", 0),
+  1448→        "fsrs_retrievability": card_info.get("retrievability", 0) if card_info else 0,
+  1449→        "dictation_errors": error_info.get("dictation_errors", 0) if error_info else 0,
+  1450→        "pronunciation_errors": error_info.get("pronunciation_errors", 0) if error_info else 0,
+  1451→        "total_errors": error_info.get("total_errors", 0) if error_info else 0,
+  1452→        "review_stats": review_stats,
+  1453→        "total_reviewable": total_reviewable,
+  1454→        **_build_word_detail(word, word_detail),
+  1455→    }
+  1456→
+  1457→    return result
+  1458→
+  1459→
+  1460→@app.post("/api/words/practice-evaluate")
+  1461→async def words_practice_evaluate(
+  1462→    audio: UploadFile = File(...),
+  1463→    word: str = Form(...),
+  1464→    user: dict = Depends(get_current_user),
+  1465→):
+  1466→    """单词跟读练习：评估发音→自动FSRS评级→返回结果+下一个推荐词
+  1467→    
+  1468→    自动评级规则：
+  1469→    - 发音准确率 >= 90%: Easy(4)
+  1470→    - 发音准确率 >= 70%: Good(3)
+  1471→    - 发音准确率 >= 50%: Hard(2)
+  1472→    - 发音准确率 < 50%: Again(1)
+  1473→    """
+  1474→    user_id = user.get("id", "default")
+  1475→
+  1476→    try:
+  1477→        g2p = get_g2p_service()
+  1478→        expected_phonemes = g2p.text_to_phonemes(word)
+  1479→
+  1480→        if not expected_phonemes:
+  1481→            raise HTTPException(status_code=400, detail="无法生成音素序列")
+  1482→
+  1483→        # Save audio to temp file
+  1484→        suffix = Path(audio.filename or "audio.wav").suffix or ".webm"
+  1485→        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+  1486→            content = await audio.read()
+  1487→            tmp.write(content)
+  1488→            tmp_path = tmp.name
+  1489→
+  1490→        try:
+  1491→            audio_float, sr = _load_audio_file(tmp_path)
+  1492→            recognizer = get_recognizer(MODEL_PATH)
+  1493→            result_dict = recognizer.recognize_with_timestamps(audio_float, sr)
+  1494→            actual_phonemes = result_dict["phonemes"]
+  1495→            timeline = result_dict["timeline"]
+  1496→            blank_segments = result_dict["blank_segments"]
+  1497→            total_duration = result_dict["total_duration"]
+  1498→
+  1499→            word_phonemes = g2p.text_to_phonemes_with_words(word)
+  1500→
+  1501→            eval_result = evaluate_pronunciation(
+  1502→                expected_phonemes=expected_phonemes,
+  1503→                actual_phonemes=actual_phonemes,
+  1504→                word_boundaries=word_phonemes,
+  1505→                timeline=timeline,
+  1506→                blank_segments=blank_segments,
+  1507→                total_duration=total_duration,
+  1508→            )
+  1509→
+  1510→            tips = generate_error_tips(eval_result.errors)
+  1511→            response = result_to_dict(eval_result, tips)
+  1512→            response["word"] = word
+  1513→
+  1514→            # 计算发音分数（0-100）
+  1515→            pronunciation_score = response.get("scores", {}).get("pronunciation", 0)
+  1516→            overall_score = response.get("scores", {}).get("overall", 0)
+  1517→            effective_score = max(pronunciation_score, overall_score)
+  1518→
+  1519→            # 自动FSRS评级
+  1520→            if effective_score >= 90:
+  1521→                auto_rating = 4  # Easy
+  1522→            elif effective_score >= 70:
+  1523→                auto_rating = 3  # Good
+  1524→            elif effective_score >= 50:
+  1525→                auto_rating = 2  # Hard
+  1526→            else:
+  1527→                auto_rating = 1  # Again
+  1528→
+  1529→            # 执行FSRS评级
+  1530→            card_id = f"word_{word}"
+  1531→            fsrs = get_fsrs_db()
+  1532→            fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
+  1533→            fsrs_result = fsrs.review_card(card_id, auto_rating, card_type="word", user_id=user_id)
+  1534→
+  1535→            # 记录发音错误（分数<60的词）
+  1536→            if effective_score < 60:
+  1537→                learning = get_learning_algorithm()
+  1538→                try:
+  1539→                    learning.record_pronunciation_errors(user_id, [{"word": word}])
+  1540→                except Exception:
+  1541→                    pass
+  1542→
+  1543→            response["auto_rating"] = auto_rating
+  1544→            response["auto_rating_name"] = {1: "Again", 2: "Hard", 3: "Good", 4: "Easy"}[auto_rating]
+  1545→            response["fsrs_result"] = fsrs_result
+  1546→            response["effective_score"] = effective_score
+  1547→
+  1548→            return response
+  1549→        finally:
+  1550→            os.unlink(tmp_path)
+  1551→
+  1552→    except HTTPException:
+  1553→        raise
+  1554→    except Exception as e:
+  1555→        traceback.print_exc()
+  1556→        raise HTTPException(status_code=500, detail=f"评测失败: {str(e)}")
+  1557→
+  1558→
+  1559→@app.post("/api/words/dictation-practice")
+  1560→async def words_dictation_practice(data: dict, user: dict = Depends(get_current_user)):
+  1561→    """单词听写练习：检查拼写→自动FSRS评级→返回结果
+  1562→    
+  1563→    自动评级规则：
+  1564→    - 完全正确: Easy(4)
+  1565→    - near_correct (相似度>=0.8): Good(3)
+  1566→    - partial (相似度>=0.6): Hard(2)
+  1567→    - substitution/deletion: Again(1)
+  1568→    """
+  1569→    word = data.get("word", "").lower().strip()
+  1570→    user_input = data.get("user_input", "").lower().strip()
+  1571→    user_id = user.get("id", "default")
+  1572→
+  1573→    if not word:
+  1574→        raise HTTPException(status_code=400, detail="缺少 word")
+  1575→
+  1576→    # 使用编辑距离检查
+  1577→    sim = _char_similarity(word, user_input)
+  1578→    dist = _char_levenshtein(word, user_input)
+  1579→    is_short_near = len(word) <= 4 and dist <= 1
+  1580→
+  1581→    # 判定结果类型
+  1582→    if word == user_input:
+  1583→        result_type = "match"
+  1584→        correct = True
+  1585→        auto_rating = 4  # Easy
+  1586→    elif sim >= 0.8 or is_short_near:
+  1587→        result_type = "near_correct"
+  1588→        correct = True
+  1589→        auto_rating = 3  # Good
+  1590→    elif sim >= 0.6:
+  1591→        result_type = "partial"
+  1592→        correct = False
+  1593→        auto_rating = 2  # Hard
+  1594→    else:
+  1595→        result_type = "substitution"
+  1596→        correct = False
+  1597→        auto_rating = 1  # Again
+  1598→
+  1599→    # FSRS评级
+  1600→    card_id = f"word_{word}"
+  1601→    fsrs = get_fsrs_db()
+  1602→    fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
+  1603→    fsrs_result = fsrs.review_card(card_id, auto_rating, card_type="word", user_id=user_id)
+  1604→
+  1605→    # 记录听写错误（非完全正确）
+  1606→    if not correct or result_type == "near_correct":
+  1607→        learning = get_learning_algorithm()
+  1608→        try:
+  1609→            learning.record_dictation_errors(user_id, [word])
+  1610→        except Exception:
+  1611→            pass
+  1612→
+  1613→    return {
+  1614→        "word": word,
+  1615→        "user_input": user_input,
+  1616→        "correct": correct,
+  1617→        "type": result_type,
+  1618→        "similarity": round(sim, 2),
+  1619→        "edit_distance": dist,
+  1620→        "auto_rating": auto_rating,
+  1621→        "auto_rating_name": {1: "Again", 2: "Hard", 3: "Good", 4: "Easy"}[auto_rating],
+  1622→        "fsrs_result": fsrs_result,
+  1623→    }
+  1624→
+  1625→
+  1626→@app.post("/api/dictation/record-errors")
+  1627→async def dictation_record_errors(data: dict, user: dict = Depends(get_current_user)):
+  1628→    """记录听写错误的单词（支持编辑距离容错等级）
+  1629→    
+  1630→    error_words 可以是：
+  1631→    - 字符串数组: ["word1", "word2"]
+  1632→    - 对象数组: [{word, user_input, type, similarity, edit_distance}]
+  1633→    
+  1634→    type 包括: substitution(完全错), partial(部分正确), near_correct(小错), deletion(漏词)
+  1635→    """
+  1636→    error_words_raw = data.get("error_words", [])
+  1637→    sentence_id = data.get("sentence_id", "")
+  1638→    user_id = user.get("id", "default")
+  1639→
+  1640→    learning = get_learning_algorithm()
+  1641→    fsrs = get_fsrs_db()
+  1642→    
+  1643→    recorded = 0
+  1644→    for item in error_words_raw:
+  1645→        if isinstance(item, dict):
+  1646→            word = item.get("word", "").lower().strip()
+  1647→            user_input = item.get("user_input", "").lower().strip()
+  1648→            error_type = item.get("type", "substitution")
+  1649→            similarity = item.get("similarity", 0)
+  1650→            edit_distance = item.get("edit_distance", 0)
+  1651→        else:
+  1652→            word = str(item).lower().strip()
+  1653→            user_input = ""
+  1654→            error_type = "substitution"
+  1655→            similarity = 0
+  1656→            edit_distance = 0
+  1657→        
+  1658→        if not word:
+  1659→            continue
+  1660→        
+  1661→        # 所有错误类型都记录到 learning_db（near_correct 也记录，因为拼写有误）
+  1662→        # 但根据错误等级调整记录策略
+  1663→        if error_type == "near_correct":
+  1664→            # 小拼写错误：记录为拼写错误（separate error_type）
+  1665→            learning.record_dictation_errors(user_id, [word], sentence_id)
+  1666→        elif error_type == "partial":
+  1667→            # 部分正确：记录为听写错误（相似度越低越需要关注）
+  1668→            learning.record_dictation_errors(user_id, [word], sentence_id)
+  1669→        elif error_type in ("substitution", "deletion"):
+  1670→            # 完全错误：正常记录
+  1671→            learning.record_dictation_errors(user_id, [word], sentence_id)
+  1672→        
+  1673→        # 为所有有错误的单词创建 FSRS 卡片
+  1674→        card_id = f"word_{word}"
+  1675→        fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
+  1676→        recorded += 1
+  1677→
+  1678→    return {"ok": True, "recorded": recorded}
+  1679→
+  1680→
+  1681→# ============================================================
+  1682→# 异步词典查询 API
+  1683→# ============================================================
+  1684→
+  1685→@app.get("/api/dict/{word}")
+  1686→async def lookup_word(word: str):
+  1687→    """异步查询单词（本地 + 网络API回退）"""
+  1688→    dict_svc = get_dict_service()
+  1689→    result = await dict_svc.lookup_async(word)
+  1690→    return result
+  1691→
+  1692→
+  1693→# ============================================================
+  1694→# 翻译 API
+  1695→# ============================================================
+  1696→
+  1697→@app.get("/api/translate")
+  1698→async def translate_endpoint(
+  1699→    text: str = Query(..., description="要翻译的英文文本"),
+  1700→    force: bool = Query(False, description="强制重新翻译（忽略缓存）"),
+  1701→    detail: bool = Query(False, description="返回详细翻译信息（含来源）"),
+  1702→):
+  1703→    """
+  1704→    翻译英文文本到中文
+  1705→
+  1706→    优先级：缓存 → Edge Translator → MyMemory → Google → ONNX本地模型 → 简易词典
+  1707→
+  1708→    - force=true: 忽略缓存，重新翻译
+  1709→    - detail=true: 返回翻译来源、在线API状态等详细信息
+  1710→    """
+  1711→    if not text or not text.strip():
+  1712→        if detail:
+  1713→            return {"original": text or "", "translation": "", "source": "none", "online_api_skipped": False}
+  1714→        return {"translation": ""}
+  1715→
+  1716→    # translate_text_detail 包含 CPU 密集的 ONNX 推理，放入线程池避免阻塞事件循环
+  1717→    loop = asyncio.get_event_loop()
+  1718→    result = await loop.run_in_executor(None, translate_text_detail, text, force)
+  1719→
+  1720→    if detail:
+  1721→        return result
+  1722→    else:
+  1723→        return {"translation": result["translation"]}
+  1724→
+  1725→
+  1726→@app.get("/api/translate/status")
+  1727→async def translate_status_endpoint():
+  1728→    """获取翻译服务状态（各引擎可用性、冷却状态）"""
+  1729→    return get_translate_status()
+  1730→
+  1731→
+  1732→# ============================================================
+  1733→# IPA 标准发音音频 API
+  1734→# ============================================================
+  1735→
+  1736→_IPA_AUDIO_DIR = _SCRIPT_DIR / "ipa_audio"
+  1737→_ARPABET_TO_AUDIO = {
+  1738→    # Vowels
+  1739→    'AA': _IPA_AUDIO_DIR / "vowels" / "Open_back_unrounded_vowel_ɑ.ogg.mp3",
+  1740→    'AE': _IPA_AUDIO_DIR / "vowels" / "Near-open_front_unrounded_vowel_æ.ogg.mp3",
+  1741→    'AH': _IPA_AUDIO_DIR / "vowels" / "Mid-central_vowel_ə.ogg.mp3",
+  1742→    'AO': _IPA_AUDIO_DIR / "vowels" / "Open-mid_back_rounded_vowel_ɔ.ogg.mp3",
+  1743→    'AW': None,
+  1744→    'AY': None,
+  1745→    'EH': _IPA_AUDIO_DIR / "vowels" / "Open-mid_front_unrounded_vowel_ɛ.ogg.mp3",
+  1746→    'ER': _IPA_AUDIO_DIR / "vowels" / "Open-mid_central_unrounded_vowel_ɜ.ogg.mp3",
+  1747→    'EY': None,
+  1748→    'IH': _IPA_AUDIO_DIR / "vowels" / "Near-close_near-front_unrounded_vowel_ɪ.ogg.mp3",
+  1749→    'IY': _IPA_AUDIO_DIR / "vowels" / "Close_front_unrounded_vowel_i.ogg.mp3",
+  1750→    'OW': None,
+  1751→    'OY': None,
+  1752→    'UH': _IPA_AUDIO_DIR / "vowels" / "Near-close_near-back_rounded_vowel_ʊ.ogg.mp3",
+  1753→    'UW': _IPA_AUDIO_DIR / "vowels" / "Close_back_rounded_vowel_u.ogg.mp3",
+  1754→    # Consonants
+  1755→    'P': _IPA_AUDIO_DIR / "consonants" / "archive" / "Voiceless_bilabial_plosive.ogg.mp3",
+  1756→    'B': _IPA_AUDIO_DIR / "consonants" / "archive" / "Voiced_bilabial_plosive.ogg.mp3",
+  1757→    'T': _IPA_AUDIO_DIR / "consonants" / "Voiceless_alveolar_plosive_t.ogg.mp3",
+  1758→    'D': _IPA_AUDIO_DIR / "consonants" / "Voiced_alveolar_plosive_d.ogg.mp3",
+  1759→    'K': _IPA_AUDIO_DIR / "consonants" / "Voiceless_velar_plosive_k.ogg.mp3",
+  1760→    'G': _IPA_AUDIO_DIR / "consonants" / "Voiced_velar_plosive_g.ogg.mp3",
+  1761→    'F': _IPA_AUDIO_DIR / "consonants" / "Voiceless_labio-dental_fricative_f.ogg.mp3",
+  1762→    'V': _IPA_AUDIO_DIR / "consonants" / "Voiced_labio-dental_fricative_v.ogg.mp3",
+  1763→    'S': _IPA_AUDIO_DIR / "consonants" / "Voiceless_alveolar_sibilant_s.ogg.mp3",
+  1764→    'Z': _IPA_AUDIO_DIR / "consonants" / "Voiced_alveolar_sibilant_z.ogg.mp3",
+  1765→    'SH': _IPA_AUDIO_DIR / "consonants" / "Voiceless_palato-alveolar_sibilant_ʃ.ogg.mp3",
+  1766→    'ZH': _IPA_AUDIO_DIR / "consonants" / "Voiced_palato-alveolar_sibilant_ʒ.ogg.mp3",
+  1767→    'TH': _IPA_AUDIO_DIR / "consonants" / "Voiceless_dental_fricative_θ.ogg.mp3",
+  1768→    'DH': _IPA_AUDIO_DIR / "consonants" / "Voiced_dental_fricative_ð.ogg.mp3",
+  1769→    'CH': None,
+  1770→    'JH': None,
+  1771→    'M': _IPA_AUDIO_DIR / "consonants" / "Bilabial_nasal_m.ogg.mp3",
+  1772→    'N': _IPA_AUDIO_DIR / "consonants" / "Alveolar_nasal_n.ogg.mp3",
+  1773→    'NG': _IPA_AUDIO_DIR / "consonants" / "Velar_nasal_ŋ.ogg.mp3",
+  1774→    'L': _IPA_AUDIO_DIR / "consonants" / "Voiced_alveolar_lateral_approximant_l.ogg.mp3",
+  1775→    'R': _IPA_AUDIO_DIR / "consonants" / "archive" / "Alveolar_approximant_ɹ.ogg.mp3",
+  1776→    'W': _IPA_AUDIO_DIR / "consonants" / "archive" / "Voiced_labio-velar_approximant.ogg.mp3",
+  1777→    'Y': _IPA_AUDIO_DIR / "consonants" / "Voiced_palatal_approximant_j.ogg.mp3",
+  1778→    'HH': _IPA_AUDIO_DIR / "consonants" / "Voiced_glottal_fricative_h.ogg.mp3",
+  1779→}
+  1780→
+  1781→_DIPHTHONG_COMPONENTS = {
+  1782→    'AW': ('AA', 'UW'),
+  1783→    'AY': ('AA', 'IY'),
+  1784→    'EY': ('EH', 'IY'),
+  1785→    'OW': ('AO', 'UW'),
+  1786→    'OY': ('AO', 'IY'),
+  1787→    'CH': ('T', 'SH'),
+  1788→    'JH': ('D', 'ZH'),
+  1789→}
+  1790→
+  1791→
+  1792→@app.get("/api/ipa-audio/{arpabet}")
+  1793→async def ipa_audio_endpoint(arpabet: str):
+  1794→    arpabet = arpabet.upper().strip()
+  1795→
+  1796→    # 1. 直接查找
+  1797→    audio_path = _ARPABET_TO_AUDIO.get(arpabet)
+  1798→    if audio_path and audio_path.is_file():
+  1799→        return FileResponse(str(audio_path), media_type="audio/mpeg")
+  1800→
+  1801→    # 2. 双元音/塞擦音
+  1802→    components = _DIPHTHONG_COMPONENTS.get(arpabet)
+  1803→    if components:
+  1804→        comp_paths = []
+  1805→        for comp in components:
+  1806→            p = _ARPABET_TO_AUDIO.get(comp)
+  1807→            if p and p.is_file():
+  1808→                comp_paths.append(f"/api/ipa-audio/{comp}")
+  1809→        if comp_paths:
+  1810→            return {
+  1811→                "type": "composite",
+  1812→                "components": comp_paths,
+  1813→                "message": f"/{ARPABET_TO_IPA.get(arpabet, arpabet)}/ is a diphthong/affricate"
+  1814→            }
+  1815→
+  1816→    # 3. TTS 回退
+  1817→    tts_path = generate_phoneme_audio(arpabet)
+  1818→    if tts_path and os.path.exists(tts_path):
+  1819→        media_type = "audio/mpeg" if tts_path.endswith(".mp3") else "audio/wav"
+  1820→        return FileResponse(tts_path, media_type=media_type)
+  1821→
+  1822→    raise HTTPException(status_code=404, detail=f"无音频: {arpabet}")
+  1823→
+  1824→
+  1825→@app.get("/api/ipa-audio-info")
+  1826→async def ipa_audio_info():
+  1827→    available = {}
+  1828→    for arpabet, path in _ARPABET_TO_AUDIO.items():
+  1829→        if path and path.is_file():
+  1830→            available[arpabet] = {"file": path.name, "ipa": ARPABET_TO_IPA.get(arpabet, "")}
+  1831→        elif arpabet in _DIPHTHONG_COMPONENTS:
+  1832→            available[arpabet] = {
+  1833→                "file": "composite",
+  1834→                "components": list(_DIPHTHONG_COMPONENTS[arpabet]),
+  1835→                "ipa": ARPABET_TO_IPA.get(arpabet, "")
+  1836→            }
+  1837→    return {"total": len(available), "phonemes": available}
+  1838→
+  1839→
+  1840→# ============================================================
+  1841→# TTS 语音合成 API
+  1842→# ============================================================
+  1843→
+  1844→@app.get("/api/tts")
+  1845→async def tts_endpoint(text: str = Query(..., description="要合成语音的文本")):
+  1846→    # edge-tts 的 save_sync 是阻塞调用，放到线程池执行避免卡住事件循环
+  1847→    loop = asyncio.get_event_loop()
+  1848→    result = await loop.run_in_executor(None, generate_tts, text)
+  1849→    if "error" in result:
+  1850→        raise HTTPException(status_code=500, detail=result["error"])
+  1851→    media_type = "audio/mpeg" if result["format"] == "mp3" else "audio/wav"
+  1852→    headers = {}
+  1853→    # 如果是静音降级，通知前端回退到浏览器 SpeechSynthesis
+  1854→    if result.get("source") == "none":
+  1855→        headers["X-TTS-Fallback"] = "browser_speech"
+  1856→    return FileResponse(result["path"], media_type=media_type, headers=headers)
+  1857→
+  1858→
+  1859→@app.get("/api/tts/phoneme")
+  1860→async def tts_phoneme_endpoint(phoneme: str = Query(..., description="音素符号")):
+  1861→    audio_path = generate_phoneme_audio(phoneme)
+  1862→    if not audio_path:
+  1863→        raise HTTPException(status_code=404, detail=f"无法为音素 '{phoneme}' 生成音频")
+  1864→    media_type = "audio/mpeg" if audio_path.endswith(".mp3") else "audio/wav"
+  1865→    return FileResponse(audio_path, media_type=media_type)
+  1866→
+  1867→
+  1868→@app.get("/api/tts/check")
+  1869→async def tts_check_endpoint():
+  1870→    return check_tts_available()
+  1871→
+  1872→
+  1873→# ============================================================
+  1874→# 听写检查 API
+  1875→# ============================================================
+  1876→
+  1877→def _char_levenshtein(s1: str, s2: str) -> int:
+  1878→    """计算两个字符串的字符级编辑距离"""
+  1879→    m, n = len(s1), len(s2)
+  1880→    if m == 0: return n
+  1881→    if n == 0: return m
+  1882→    dp = [[0] * (n + 1) for _ in range(m + 1)]
+  1883→    for i in range(m + 1): dp[i][0] = i
+  1884→    for j in range(n + 1): dp[0][j] = j
+  1885→    for i in range(1, m + 1):
+  1886→        for j in range(1, n + 1):
+  1887→            cost = 0 if s1[i-1] == s2[j-1] else 1
+  1888→            dp[i][j] = min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + cost)
+  1889→    return dp[m][n]
+  1890→
+  1891→
+  1892→def _char_similarity(s1: str, s2: str) -> float:
+  1893→    """计算两个字符串的相似度（0~1，1=完全一致）"""
+  1894→    max_len = max(len(s1), len(s2))
+  1895→    if max_len == 0: return 1.0
+  1896→    dist = _char_levenshtein(s1, s2)
+  1897→    return 1.0 - dist / max_len
+  1898→
+  1899→def _levenshtein_align(expected_words: list, user_words: list) -> list:
+  1900→    m, n = len(expected_words), len(user_words)
+  1901→    dp = [[0] * (n + 1) for _ in range(m + 1)]
+  1902→    trace = [[0] * (n + 1) for _ in range(m + 1)]
+  1903→
+  1904→    for i in range(1, m + 1):
+  1905→        dp[i][0] = dp[i - 1][0] + 1
+  1906→        trace[i][0] = 1
+  1907→    for j in range(1, n + 1):
+  1908→        dp[0][j] = dp[0][j - 1] + 1
+  1909→        trace[0][j] = 2
+  1910→
+  1911→    for i in range(1, m + 1):
+  1912→        for j in range(1, n + 1):
+  1913→            cost = 0 if expected_words[i - 1] == user_words[j - 1] else 1
+  1914→            sub = dp[i - 1][j - 1] + cost
+  1915→            delete = dp[i - 1][j] + 1
+  1916→            insert = dp[i][j - 1] + 1
+  1917→
+  1918→            if sub <= delete and sub <= insert:
+  1919→                dp[i][j] = sub
+  1920→                trace[i][j] = 0
+  1921→            elif delete <= insert:
+  1922→                dp[i][j] = delete
+  1923→                trace[i][j] = 1
+  1924→            else:
+  1925→                dp[i][j] = insert
+  1926→                trace[i][j] = 2
+  1927→
+  1928→    alignment = []
+  1929→    i, j = m, n
+  1930→    while i > 0 or j > 0:
+  1931→        if i > 0 and j > 0 and trace[i][j] == 0:
+  1932→            alignment.append((expected_words[i - 1], user_words[j - 1], "match" if expected_words[i - 1] == user_words[j - 1] else "substitution"))
+  1933→            i -= 1
+  1934→            j -= 1
+  1935→        elif i > 0 and trace[i][j] == 1:
+  1936→            alignment.append((expected_words[i - 1], "", "deletion"))
+  1937→            i -= 1
+  1938→        else:
+  1939→            alignment.append(("", user_words[j - 1], "insertion"))
+  1940→            j -= 1
+  1941→
+  1942→    alignment.reverse()
+  1943→    return alignment
+  1944→
+  1945→
+  1946→@app.post("/api/dictation/check")
+  1947→async def dictation_check(data: dict):
+  1948→    expected = data.get("text", data.get("sentence_text", "")).lower().strip()
+  1949→    user_input_raw = data.get("user_input", "")
+  1950→    if isinstance(user_input_raw, list):
+  1951→        user_input = " ".join(str(w) for w in user_input_raw).lower().strip()
+  1952→    else:
+  1953→        user_input = str(user_input_raw).lower().strip()
+  1954→
+  1955→    expected_words = expected.split()
+  1956→    user_words = user_input.split()
+  1957→
+  1958→    alignment = _levenshtein_align(expected_words, user_words)
+  1959→
+  1960→    results = []
+  1961→    # 阈值：相似度 >= 0.6 算"部分正确"，>= 0.8 算"基本正确"
+  1962→    # 短词（<=4字母）特殊处理：编辑距离<=1就算near_correct
+  1963→    PARTIAL_THRESHOLD = 0.6
+  1964→    NEAR_CORRECT_THRESHOLD = 0.8
+  1965→    
+  1966→    for ew, uw, align_type in alignment:
+  1967→        if align_type == "match":
+  1968→            results.append({"expected": ew, "actual": uw, "correct": True, "type": "match"})
+  1969→        elif align_type == "substitution":
+  1970→            sim = _char_similarity(ew, uw)
+  1971→            dist = _char_levenshtein(ew, uw)
+  1972→            # 短词特殊处理：3-4字母的词编辑距离1就算near_correct
+  1973→            is_short_near = len(ew) <= 4 and dist <= 1
+  1974→            if sim >= NEAR_CORRECT_THRESHOLD or is_short_near:
+  1975→                # 小错误（1-2个字母差异），算基本正确，但记录为"near_correct"
+  1976→                results.append({
+  1977→                    "expected": ew, "actual": uw, "correct": True, 
+  1978→                    "type": "near_correct", "similarity": round(sim, 2),
+  1979→                    "edit_distance": dist,
+  1980→                })
+  1981→            elif sim >= PARTIAL_THRESHOLD:
+  1982→                # 有一定相似度（拼写有大体框架），部分正确
+  1983→                results.append({
+  1984→                    "expected": ew, "actual": uw, "correct": False, 
+  1985→                    "type": "partial", "similarity": round(sim, 2),
+  1986→                    "edit_distance": dist,
+  1987→                })
+  1988→            else:
+  1989→                results.append({"expected": ew, "actual": uw, "correct": False, "type": "substitution"})
+  1990→        elif align_type == "deletion":
+  1991→            results.append({"expected": ew, "actual": "", "correct": False, "type": "deletion"})
+  1992→        elif align_type == "insertion":
+  1993→            results.append({"expected": "", "actual": uw, "correct": False, "type": "insertion"})
+  1994→
+  1995→    # 部分正确算半分
+  1996→    correct_count = sum(1 for r in results if r["correct"])
+  1997→    partial_count = sum(1 for r in results if r.get("type") == "partial")
+  1998→    accuracy = (correct_count + partial_count * 0.5) / max(len(expected_words), 1) * 100
+  1999→
+  2000→    # 错误单词：完全错误和部分错误的都记录
+
+[showing lines 1-2000 of 2805; use offset=2001 with limit to continue reading]

@@ -42,6 +42,8 @@ from dict_service import get_dict_service
 from translate_service import translate_text, translate_text_detail, get_translate_status
 from auth_service import get_auth_service
 from learning_algorithm import get_learning_algorithm
+from metacognition import get_metacognition
+from semantic_network import get_semantic_network
 
 app = FastAPI(title="Phonos 口语练习平台", version="2.1.0")
 
@@ -2358,6 +2360,437 @@ def _build_word_detail(word: str, info: dict) -> dict:
         "grammar_note": info.get("grammar_note", ""),
         "source": info.get("source", "g2p"),
     }
+
+
+# ============================================================
+# 元认知 (Metacognition) API
+# ============================================================
+
+@app.get("/api/metacognition/profile")
+async def metacognition_profile(user: dict = Depends(get_current_user)):
+    """获取用户的认知画像（学习原型、各项指标）"""
+    user_id = user.get("id", "default")
+    try:
+        meta = get_metacognition()
+        profile = meta.get_cognitive_profile(user_id)
+        return profile
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取认知画像失败: {str(e)}")
+
+
+@app.get("/api/metacognition/strategies")
+async def metacognition_strategies(user: dict = Depends(get_current_user)):
+    """获取策略推荐（基于用户认知画像）"""
+    user_id = user.get("id", "default")
+    try:
+        meta = get_metacognition()
+        strategies = meta.get_strategy_recommendations(user_id)
+        return strategies
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取策略推荐失败: {str(e)}")
+
+
+@app.post("/api/metacognition/prediction")
+async def metacognition_prediction(data: dict, user: dict = Depends(get_current_user)):
+    """记录预测校准条目（练习前后对比预测分数与实际分数）"""
+    user_id = user.get("id", "default")
+    card_id = data.get("card_id")
+    card_type = data.get("card_type", "word")
+    predicted_score = data.get("predicted_score")
+    actual_score = data.get("actual_score")
+
+    if card_id is None or predicted_score is None or actual_score is None:
+        raise HTTPException(status_code=400, detail="缺少 card_id, predicted_score 或 actual_score")
+
+    try:
+        meta = get_metacognition()
+        result = meta.record_prediction(
+            user_id=user_id,
+            card_id=card_id,
+            card_type=card_type,
+            predicted_score=float(predicted_score),
+            actual_score=float(actual_score),
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"记录预测校准失败: {str(e)}")
+
+
+@app.get("/api/metacognition/calibration")
+async def metacognition_calibration(user: dict = Depends(get_current_user)):
+    """获取预测校准统计"""
+    user_id = user.get("id", "default")
+    try:
+        meta = get_metacognition()
+        stats = meta.get_calibration_stats(user_id)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取校准统计失败: {str(e)}")
+
+
+@app.post("/api/metacognition/session")
+async def metacognition_session(data: dict, user: dict = Depends(get_current_user)):
+    """记录学习会话"""
+    user_id = user.get("id", "default")
+    try:
+        meta = get_metacognition()
+        result = meta.record_session(user_id=user_id, session_data=data)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"记录学习会话失败: {str(e)}")
+
+
+@app.get("/api/metacognition/session-quality")
+async def metacognition_session_quality(user: dict = Depends(get_current_user)):
+    """获取会话质量指标"""
+    user_id = user.get("id", "default")
+    try:
+        meta = get_metacognition()
+        quality = meta.get_session_quality(user_id)
+        return quality
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取会话质量失败: {str(e)}")
+
+
+# ============================================================
+# 语义网络 (Semantic Network) API
+# ============================================================
+
+@app.get("/api/semantic/network/{word}")
+async def semantic_network_word(word: str, depth: int = Query(1, description="关系网络深度")):
+    """获取单词的语义网络"""
+    try:
+        sn = get_semantic_network()
+        network = sn.get_word_network(word, depth=depth)
+        return network
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取语义网络失败: {str(e)}")
+
+
+@app.get("/api/semantic/collocations/{word}")
+async def semantic_collocations(word: str, min_strength: float = Query(0.1, description="最小搭配强度")):
+    """获取单词的搭配词"""
+    try:
+        sn = get_semantic_network()
+        collocations = sn.get_collocations(word, min_strength=min_strength)
+        return {"word": word, "collocations": [{"word": c[0], "strength": round(c[1], 4)} for c in collocations]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取搭配词失败: {str(e)}")
+
+
+@app.get("/api/semantic/related/{word}")
+async def semantic_related(
+    word: str,
+    relation_type: Optional[str] = Query(None, description="关系类型: COOCCURRENCE, SEMANTIC_SIMILARITY, SYNTAGMATIC, PARADIGMATIC"),
+    limit: int = Query(10, description="返回数量限制"),
+):
+    """获取相关词汇"""
+    try:
+        sn = get_semantic_network()
+        related = sn.get_related_words(word, relation_type=relation_type, limit=limit)
+        return {"word": word, "related": related}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取相关词失败: {str(e)}")
+
+
+@app.get("/api/semantic/optimal-path")
+async def semantic_optimal_path(
+    target_words: Optional[str] = Query(None, description="目标词汇（逗号分隔）"),
+    user: dict = Depends(get_current_user),
+):
+    """获取认知最优学习路径"""
+    user_id = user.get("id", "default")
+    try:
+        sn = get_semantic_network()
+        targets = None
+        if target_words:
+            targets = [w.strip() for w in target_words.split(",") if w.strip()]
+        path = sn.get_optimal_path(user_id, target_words=targets)
+        return {"path": path, "target_words": targets}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取最优路径失败: {str(e)}")
+
+
+@app.get("/api/semantic/explore-next")
+async def semantic_explore_next(
+    card_type: str = Query("word", description="卡片类型"),
+    user: dict = Depends(get_current_user),
+):
+    """获取下一张卡片（探索-利用平衡）"""
+    user_id = user.get("id", "default")
+    try:
+        sn = get_semantic_network()
+        result = sn.get_next_card_explore_exploit(user_id, card_type=card_type)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取探索卡片失败: {str(e)}")
+
+
+@app.get("/api/semantic/field-coverage")
+async def semantic_field_coverage(user: dict = Depends(get_current_user)):
+    """获取语义场覆盖度统计"""
+    user_id = user.get("id", "default")
+    try:
+        sn = get_semantic_network()
+        coverage = sn.get_field_coverage(user_id)
+        return {"coverage": coverage}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取语义场覆盖度失败: {str(e)}")
+
+
+@app.get("/api/semantic/unexplored-fields")
+async def semantic_unexplored_fields(user: dict = Depends(get_current_user)):
+    """获取未探索的语义场"""
+    user_id = user.get("id", "default")
+    try:
+        sn = get_semantic_network()
+        fields = sn.get_unexplored_fields(user_id)
+        return {"unexplored_fields": fields}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取未探索语义场失败: {str(e)}")
+
+
+@app.post("/api/semantic/rebuild")
+async def semantic_rebuild():
+    """重建语义网络（从数据文件重新构建）"""
+    try:
+        sn = get_semantic_network()
+        sn.build_network()
+        stats = sn.get_network_stats()
+        return {"ok": True, "message": "语义网络重建完成", "stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重建语义网络失败: {str(e)}")
+
+
+# ============================================================
+# 设置 (Settings) API
+# ============================================================
+
+@app.get("/api/settings")
+async def get_settings(user: dict = Depends(get_current_user)):
+    """获取用户当前设置（FSRS参数、期望保持率、探索率等）"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+        params = fsrs.get_user_params(user_id)
+
+        # 从用户 profile 获取扩展设置（get_current_user 已包含 settings 字段）
+        user_settings = user.get("settings", {})
+
+        # 合并 FSRS 参数和用户扩展设置
+        result = {
+            "desired_retention": params.get("desired_retention", 0.9),
+            "new_per_day": params.get("new_per_day", 5),
+            "maximum_interval": params.get("maximum_interval", 36500),
+            "learning_steps": params.get("learning_steps", [1, 10]),
+            "relearning_steps": params.get("relearning_steps", [10]),
+            "fsrs_params": params.get("params", []),
+            "fit_count": params.get("fit_count", 0),
+            "last_fit_time": params.get("last_fit_time", 0),
+            # 扩展设置（来自用户 profile settings）
+            "exploration_rate": user_settings.get("exploration_rate", 0.3),
+            "enable_prediction_calibration": user_settings.get("enable_prediction_calibration", True),
+        }
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取设置失败: {str(e)}")
+
+
+@app.put("/api/settings")
+async def update_settings(data: dict, user: dict = Depends(get_current_user)):
+    """更新用户设置"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+
+        # FSRS 相关参数
+        fsrs_params = {}
+        if "desired_retention" in data:
+            fsrs_params["desired_retention"] = float(data["desired_retention"])
+        if "new_per_day" in data:
+            fsrs_params["new_per_day"] = int(data["new_per_day"])
+        if "maximum_interval" in data:
+            fsrs_params["maximum_interval"] = int(data["maximum_interval"])
+        if "learning_steps" in data:
+            fsrs_params["learning_steps"] = data["learning_steps"]
+        if "relearning_steps" in data:
+            fsrs_params["relearning_steps"] = data["relearning_steps"]
+        if "fsrs_params" in data:
+            fsrs_params["params"] = data["fsrs_params"]
+
+        if fsrs_params:
+            fsrs.set_user_params(user_id, fsrs_params)
+
+        # 扩展设置（存入用户 profile settings）
+        current_settings = dict(user.get("settings", {}))
+        extended_keys = ["exploration_rate", "enable_prediction_calibration"]
+        updated = False
+        for key in extended_keys:
+            if key in data:
+                current_settings[key] = data[key]
+                updated = True
+
+        if updated:
+            try:
+                auth = get_auth_service()
+                auth.update_profile(user_id=user_id, settings=current_settings)
+            except Exception as e:
+                print(f"[设置] 更新扩展设置失败: {e}")
+
+        return {"ok": True, "message": "设置已更新"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新设置失败: {str(e)}")
+
+
+@app.get("/api/settings/defaults")
+async def get_settings_defaults():
+    """获取默认设置"""
+    from fsrs_db import (
+        DEFAULT_FSRS_PARAMS, DEFAULT_DESIRED_RETENTION,
+        DEFAULT_LEARNING_STEPS, DEFAULT_RELEARNING_STEPS,
+        DEFAULT_MAXIMUM_INTERVAL, DEFAULT_NEW_PER_DAY,
+    )
+    return {
+        "desired_retention": DEFAULT_DESIRED_RETENTION,
+        "new_per_day": DEFAULT_NEW_PER_DAY,
+        "maximum_interval": DEFAULT_MAXIMUM_INTERVAL,
+        "learning_steps": list(DEFAULT_LEARNING_STEPS),
+        "relearning_steps": list(DEFAULT_RELEARNING_STEPS),
+        "fsrs_params": list(DEFAULT_FSRS_PARAMS),
+        "exploration_rate": 0.3,
+        "enable_prediction_calibration": True,
+    }
+
+
+@app.post("/api/settings/reset")
+async def reset_settings(user: dict = Depends(get_current_user)):
+    """重置为默认设置"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+        from fsrs_db import (
+            DEFAULT_FSRS_PARAMS, DEFAULT_DESIRED_RETENTION,
+            DEFAULT_LEARNING_STEPS, DEFAULT_RELEARNING_STEPS,
+            DEFAULT_MAXIMUM_INTERVAL, DEFAULT_NEW_PER_DAY,
+        )
+        fsrs.set_user_params(user_id, {
+            "params": list(DEFAULT_FSRS_PARAMS),
+            "desired_retention": DEFAULT_DESIRED_RETENTION,
+            "learning_steps": list(DEFAULT_LEARNING_STEPS),
+            "relearning_steps": list(DEFAULT_RELEARNING_STEPS),
+            "maximum_interval": DEFAULT_MAXIMUM_INTERVAL,
+            "new_per_day": DEFAULT_NEW_PER_DAY,
+        })
+
+        # 重置扩展设置
+        auth = get_auth_service()
+        try:
+            auth.update_profile(user_id=user_id, settings={
+                "exploration_rate": 0.3,
+                "enable_prediction_calibration": True,
+            })
+        except Exception:
+            pass
+
+        return {"ok": True, "message": "设置已重置为默认值"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重置设置失败: {str(e)}")
+
+
+@app.post("/api/settings/fsrs-fit")
+async def settings_fsrs_fit(user: dict = Depends(get_current_user)):
+    """手动触发 FSRS 参数拟合"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+        result = fsrs.fit_params(user_id=user_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"FSRS 参数拟合失败: {str(e)}")
+
+
+@app.get("/api/settings/fsrs-params")
+async def settings_fsrs_params(user: dict = Depends(get_current_user)):
+    """获取当前 FSRS 参数（默认 + 用户自定义）"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+        user_params = fsrs.get_user_params(user_id)
+
+        from fsrs_db import DEFAULT_FSRS_PARAMS
+        return {
+            "default_params": list(DEFAULT_FSRS_PARAMS),
+            "user_params": user_params.get("params", list(DEFAULT_FSRS_PARAMS)),
+            "is_customized": user_params.get("params", []) != list(DEFAULT_FSRS_PARAMS),
+            "fit_count": user_params.get("fit_count", 0),
+            "last_fit_time": user_params.get("last_fit_time", 0),
+            "desired_retention": user_params.get("desired_retention", 0.9),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取 FSRS 参数失败: {str(e)}")
+
+
+# ============================================================
+# 增强统计 (Enhanced Stats) API
+# ============================================================
+
+@app.get("/api/stats/enhanced")
+async def get_enhanced_stats(user: dict = Depends(get_current_user)):
+    """增强统计：认知画像 + 语义场覆盖 + 探索利用比 + 校准分数 + 会话质量趋势"""
+    user_id = user.get("id", "default")
+
+    result = {
+        "cognitive_profile": {},
+        "field_coverage": [],
+        "exploration_exploitation": {},
+        "calibration_score": {},
+        "session_quality": {},
+    }
+
+    # 1. 认知画像
+    try:
+        meta = get_metacognition()
+        profile = meta.get_cognitive_profile(user_id)
+        result["cognitive_profile"] = {
+            "archetype": profile.get("archetype", "未知"),
+            "metrics": profile.get("metrics", {}),
+        }
+    except Exception as e:
+        result["cognitive_profile"] = {"error": str(e)}
+
+    # 2. 语义场覆盖
+    try:
+        sn = get_semantic_network()
+        coverage = sn.get_field_coverage(user_id)
+        result["field_coverage"] = coverage
+    except Exception as e:
+        result["field_coverage"] = [{"error": str(e)}]
+
+    # 3. 探索-利用比
+    try:
+        sn = get_semantic_network()
+        explore_stats = sn.get_exploration_stats(user_id)
+        result["exploration_exploitation"] = explore_stats
+    except Exception as e:
+        result["exploration_exploitation"] = {"error": str(e)}
+
+    # 4. 校准分数
+    try:
+        meta = get_metacognition()
+        calibration = meta.get_calibration_stats(user_id)
+        result["calibration_score"] = calibration
+    except Exception as e:
+        result["calibration_score"] = {"error": str(e)}
+
+    # 5. 会话质量趋势
+    try:
+        meta = get_metacognition()
+        quality = meta.get_session_quality(user_id)
+        result["session_quality"] = quality
+    except Exception as e:
+        result["session_quality"] = {"error": str(e)}
+
+    return result
 
 
 # 挂载前端

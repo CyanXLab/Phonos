@@ -6,6 +6,9 @@
     <title>Phonos - 口语练习平台</title>
     <link rel="stylesheet" href="style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 </head>
 <body>
 <div id="app">
@@ -39,6 +42,12 @@
                 </button>
                 <button class="btn-icon" id="btnWordPractice" title="单词练习">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                </button>
+                <button class="btn-icon" id="btnCognitiveMirror" title="认知镜像">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                </button>
+                <button class="btn-icon" id="btnSettings" title="设置">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 </button>
                 <button class="btn-icon" id="btnStats" title="学习统计">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
@@ -140,6 +149,13 @@
                 </h3>
             </div>
             <div class="words-list collapse-content collapsed" id="wordsList"></div>
+            <!-- Semantic Network Viewer -->
+            <div class="semantic-network-section" id="semanticNetworkSection" style="display:none;">
+                <h4 class="mini-title">🔗 词汇网络</h4>
+                <div class="semantic-network-content" id="semanticNetworkContent">
+                    <div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">选择一个单词查看词汇网络</div>
+                </div>
+            </div>
         </div>
 
         <!-- 听写卡片（在最下面，防止看到答案） -->
@@ -252,30 +268,53 @@
                 <div class="tips-list collapse-content collapsed" id="tipsList"></div>
             </div>
 
+            <!-- Prediction Calibration -->
+            <div class="prediction-section" id="predictionSection" style="display:none;">
+                <h4 class="mini-title">🎯 预测分数</h4>
+                <p class="prediction-hint">你觉得这次能得多少分？</p>
+                <div class="prediction-slider-wrap">
+                    <span class="prediction-label-low">没把握</span>
+                    <input type="range" id="predictionSlider" class="prediction-slider" min="0" max="100" value="50">
+                    <span class="prediction-label-high">很有把握</span>
+                </div>
+                <div class="prediction-value" id="predictionValue">50</div>
+            </div>
+            <!-- Calibration Display -->
+            <div class="calibration-display" id="calibrationDisplay" style="display:none;">
+                <div class="calibration-item">
+                    <span class="calibration-label">预测</span>
+                    <span class="calibration-val prediction" id="calPrediction">-</span>
+                </div>
+                <div class="calibration-item">
+                    <span class="calibration-label">实际</span>
+                    <span class="calibration-val actual" id="calActual">-</span>
+                </div>
+                <div class="calibration-item">
+                    <span class="calibration-label">偏差</span>
+                    <span class="calibration-val deviation" id="calDeviation">-</span>
+                </div>
+            </div>
+
             <!-- FSRS Rating -->
             <div class="fsrs-section" id="fsrsSection">
                 <h4 class="mini-title">记忆评级</h4>
                 <p class="fsrs-hint">你对这句话的掌握程度如何？</p>
                 <div class="fsrs-buttons">
-                    <button class="fsrs-btn fsrs-again" data-rating="1" title="完全不记得">
-                        <span class="fsrs-icon"></span>
+                    <button class="fsrs-btn fsrs-again" data-rating="1" title="完全忘记">
                         <span class="fsrs-label">Again</span>
-                        <span class="fsrs-desc">完全不记得</span>
+                        <span class="fsrs-subtitle">完全忘记</span>
                     </button>
-                    <button class="fsrs-btn fsrs-hard" data-rating="2" title="很吃力">
-                        <span class="fsrs-icon"></span>
+                    <button class="fsrs-btn fsrs-hard" data-rating="2" title="困难回忆">
                         <span class="fsrs-label">Hard</span>
-                        <span class="fsrs-desc">很吃力</span>
+                        <span class="fsrs-subtitle">困难回忆</span>
                     </button>
-                    <button class="fsrs-btn fsrs-good" data-rating="3" title="还行">
-                        <span class="fsrs-icon"></span>
+                    <button class="fsrs-btn fsrs-good" data-rating="3" title="犹豫想起">
                         <span class="fsrs-label">Good</span>
-                        <span class="fsrs-desc">还行</span>
+                        <span class="fsrs-subtitle">犹豫想起</span>
                     </button>
-                    <button class="fsrs-btn fsrs-easy" data-rating="4" title="很轻松">
-                        <span class="fsrs-icon"></span>
+                    <button class="fsrs-btn fsrs-easy" data-rating="4" title="轻松回忆">
                         <span class="fsrs-label">Easy</span>
-                        <span class="fsrs-desc">很轻松</span>
+                        <span class="fsrs-subtitle">轻松回忆</span>
                     </button>
                 </div>
             </div>
@@ -437,6 +476,32 @@
                 <div class="practice-content" id="practiceContent">
                     <div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载中...</div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cognitive Mirror Modal -->
+    <div class="modal-overlay" id="cognitiveMirrorModal" style="display:none;">
+        <div class="modal cognitive-mirror-modal">
+            <div class="modal-header">
+                <h3>🪞 认知镜像</h3>
+                <button class="btn-icon modal-close" id="closeCognitiveMirrorModal">x</button>
+            </div>
+            <div class="modal-body" id="cognitiveMirrorBody">
+                <div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载认知画像...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal" style="display:none;">
+        <div class="modal settings-modal">
+            <div class="modal-header">
+                <h3>⚙️ 设置</h3>
+                <button class="btn-icon modal-close" id="closeSettingsModal">x</button>
+            </div>
+            <div class="modal-body" id="settingsModalBody">
+                <div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载设置...</div>
             </div>
         </div>
     </div>
