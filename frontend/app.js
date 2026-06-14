@@ -3531,6 +3531,8 @@ const PS = {
     practiced: 0,
     total: 0,
     isRecording: false,
+    isStarting: false,     // guard against double-click during getUserMedia
+    autoStopTimer: null,   // store setTimeout ID so we can clear it
     mediaRecorder: null,
     audioChunks: [],
     ttsAudio: null,
@@ -3607,6 +3609,15 @@ async function openWordPractice() {
 }
 
 async function loadNextPracticeWord() {
+    // Clean up any ongoing recording from previous word
+    if (PS.isRecording) stopPracticeRecording();
+    if (PS.autoStopTimer) {
+        clearTimeout(PS.autoStopTimer);
+        PS.autoStopTimer = null;
+    }
+    PS.isStarting = false;
+    PS.isRecording = false;
+
     const content = document.getElementById('practiceContent');
     content.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载中...</div>';
 
@@ -3699,19 +3710,39 @@ function renderDictationCard(data) {
 }
 
 async function startPracticeRecording() {
-    if (PS.isRecording) {
-        stopPracticeRecording();
+    // Guard: prevent double-click during async getUserMedia or while already recording
+    if (PS.isStarting || PS.isRecording) {
+        if (PS.isRecording) stopPracticeRecording();
         return;
     }
 
     const btn = document.getElementById('btnRecordWord');
     if (!btn) return;
 
+    PS.isStarting = true;  // lock to prevent re-entry
+    btn.disabled = true;   // visually disable during microphone init
+    btn.innerHTML = '🎤 请求麦克风...';
+
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        // If user navigated away or cancelled while we were waiting, bail out
+        if (!PS.isStarting) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+        }
+
+        // Clear any stale auto-stop timer from a previous recording
+        if (PS.autoStopTimer) {
+            clearTimeout(PS.autoStopTimer);
+            PS.autoStopTimer = null;
+        }
+
         PS.audioChunks = [];
         PS.mediaRecorder = new MediaRecorder(stream);
         PS.isRecording = true;
+        PS.isStarting = false;  // unlock
+        btn.disabled = false;
         btn.classList.add('recording');
         btn.innerHTML = '⏹ 停止';
 
@@ -3723,22 +3754,36 @@ async function startPracticeRecording() {
             stream.getTracks().forEach(t => t.stop());
             btn.classList.remove('recording');
             btn.innerHTML = '🎤 跟读';
+            btn.disabled = false;
             PS.isRecording = false;
+            PS.isStarting = false;
+            PS.autoStopTimer = null;
             await submitPronunciationPractice();
         };
 
         PS.mediaRecorder.start();
-        // Auto-stop after 5 seconds
-        setTimeout(() => {
+
+        // Auto-stop after 5 seconds — store timer ID so we can cancel it later
+        PS.autoStopTimer = setTimeout(() => {
+            PS.autoStopTimer = null;
             if (PS.isRecording) stopPracticeRecording();
         }, 5000);
+
     } catch {
         btn.classList.remove('recording');
+        btn.innerHTML = '🎤 跟读';
+        btn.disabled = false;
         PS.isRecording = false;
+        PS.isStarting = false;
     }
 }
 
 function stopPracticeRecording() {
+    // Clear the auto-stop timer to prevent it from firing later
+    if (PS.autoStopTimer) {
+        clearTimeout(PS.autoStopTimer);
+        PS.autoStopTimer = null;
+    }
     if (PS.mediaRecorder && PS.mediaRecorder.state !== 'inactive') {
         PS.mediaRecorder.stop();
     }

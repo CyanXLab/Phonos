@@ -1620,6 +1620,11 @@ body {
     transition: all 0.2s;
 }
 .btn-practice-record:hover { opacity: 0.9; }
+.btn-practice-record:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    animation: none;
+}
 .btn-practice-record.recording {
     background: var(--err);
     animation: pulse 1.5s infinite;
