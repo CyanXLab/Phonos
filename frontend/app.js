@@ -2036,7 +2036,8 @@ function renderWordScores(words) {
     el.wordScoreGrid.innerHTML = words.map(w => {
         const calibratedAcc = Math.round(calibrateScore(w.accuracy));
         const c = calibratedAcc >= 80 ? 'hi' : calibratedAcc >= 50 ? 'md' : 'lo';
-        return `<div class="ws-item${w.has_error ? ' err' : ''}"><div class="ws-word">${w.word}</div><div class="ws-acc ${c}">${calibratedAcc}%</div></div>`;
+        const errorTitle = w.has_error ? `title="发音准确度: ${calibratedAcc}%"` : '';
+        return `<div class="ws-item${w.has_error ? ' err' : ''}" ${errorTitle}><div class="ws-word">${w.word}</div><div class="ws-acc ${c}">${calibratedAcc}%</div></div>`;
     }).join('');
 }
 
@@ -2334,16 +2335,19 @@ function renderStatsContent(stats) {
         errorDetailHTML = allErrors.map(([p, v], i) => {
             const ipa = ARPABET_TO_IPA[p] || p;
             const c = v.count;
+            const total = v.total || c;
             const severity = c >= 5 ? 'high' : c >= 3 ? 'medium' : 'low';
             const severityColor = c >= 5 ? 'var(--err)' : c >= 3 ? 'var(--warn)' : 'var(--pri)';
             const barWidth = Math.min(100, (c / (allErrors[0][1].count || 1)) * 100);
             const hidden = i >= errorInitiallyShown ? ' style="display:none;"' : '';
             const rateStr = v.rate > 0 ? `<span class="error-detail-rate" style="color:${severityColor};font-size:11px;margin-left:6px;">${v.rate}%读错</span>` : '';
+            const totalStr = total > 0 ? `<span style="color:var(--text3);font-size:11px;margin-left:4px;">(${c}/${total})</span>` : '';
             return `<div class="error-detail-item" data-index="${i}"${hidden}>
                 <div class="error-detail-header">
                     <span class="error-detail-ipa">/${ipa}/</span>
                     <span class="error-detail-arpabet">${p}</span>
                     <span class="error-detail-count" style="color:${severityColor};">${c}次</span>
+                    ${totalStr}
                     ${rateStr}
                 </div>
                 <div class="error-detail-bar">
@@ -2659,11 +2663,13 @@ function renderHeatmap(container, heatmapData) {
     const days = 365;
     
     // Build date array for last 365 days
+    // Use local date format (YYYY-MM-DD) to match backend's DATE(..., 'localtime')
     const dates = [];
     for (let i = days - 1; i >= 0; i--) {
         const d = new Date(now);
         d.setDate(d.getDate() - i);
-        const key = d.toISOString().slice(0, 10);
+        // Format as local YYYY-MM-DD to match SQL's DATE(..., 'localtime')
+        const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
         dates.push({ date: key, day: d.getDay(), count: heatmapData[key]?.count || 0, avg: heatmapData[key]?.avg_score || 0 });
     }
     
@@ -3452,7 +3458,12 @@ async function loadNextPracticeWord() {
     try {
         // 根据当前标签页传递 mode 参数给后端，让后端返回对应类型的单词
         const modeParam = PS.tab === 'pronunciation' ? 'pronunciation' : PS.tab === 'dictation' ? 'dictation' : 'all';
-        const r = await fetchWithAuth(`${API}/api/words/practice-next?mode=${modeParam}`);
+        let url = `${API}/api/words/practice-next?mode=${modeParam}`;
+        // Pass exclude list to prevent LEARNING/RELEARNING cards from re-appearing
+        if (S._reviewedCardIds && S._reviewedCardIds.length > 0) {
+            url += `&exclude=${encodeURIComponent(S._reviewedCardIds.join(','))}`;
+        }
+        const r = await fetchWithAuth(url);
         if (r.ok) {
             const data = await r.json();
             if (!data.word) {
@@ -3602,11 +3613,47 @@ async function submitPronunciationPractice() {
             const ratingColors = { 1: 'var(--fsrs-again)', 2: 'var(--fsrs-hard)', 3: 'var(--fsrs-good)', 4: 'var(--fsrs-easy)' };
 
             const resultClass = score >= 70 ? 'correct' : score >= 50 ? 'partial-result' : 'incorrect';
+
+            // Add word to session reviewed list (prevent same word re-appearing in this session)
+            const cardId = `word_${PS.currentWord.word}`;
+            if (!S._reviewedCardIds.includes(cardId)) {
+                S._reviewedCardIds.push(cardId);
+                if (S._reviewedCardIds.length > 50) S._reviewedCardIds.shift();
+            }
+
+            // Show detailed pronunciation errors
+            let errorDetail = '';
+            if (data.words && data.words.length > 0) {
+                const wordErrors = data.words.filter(w => w.has_error);
+                if (wordErrors.length > 0) {
+                    errorDetail = '<div class="practice-word-errors">' +
+                        wordErrors.map(w => {
+                            const acc = Math.round(calibrateScore(w.accuracy));
+                            const errClass = acc >= 50 ? 'partial' : 'wrong';
+                            return `<span class="word-error-chip ${errClass}">${w.word} <small>${acc}%</small></span>`;
+                        }).join('') +
+                        '</div>';
+                }
+            }
+            if (data.errors && data.errors.length > 0) {
+                const phonErrors = data.errors.filter(e => e.type === 'substitution' || e.type === 'deletion');
+                if (phonErrors.length > 0) {
+                    errorDetail += '<div class="practice-phoneme-errors">' +
+                        phonErrors.slice(0, 5).map(e => {
+                            const ipaExp = ARPABET_TO_IPA[e.expected] || e.expected;
+                            const ipaAct = e.actual ? (ARPABET_TO_IPA[e.actual] || e.actual) : '—';
+                            return `<span class="phoneme-error-chip">/${ipaExp}/→/${ipaAct}/</span>`;
+                        }).join('') +
+                        '</div>';
+                }
+            }
+
             resultArea.innerHTML = `
             <div class="practice-result ${resultClass}">
                 <div class="practice-score-value" style="position:static;font-size:32px;color:${ratingColors[rating]}">${Math.round(score)}</div>
                 <div style="font-size:13px;margin-top:4px;">发音分数</div>
             </div>
+            ${errorDetail}
             <div class="practice-fsrs-result">
                 自动评级: <strong style="color:${ratingColors[rating]}">${ratingNames[rating]}</strong>
                 ${data.fsrs_result ? ` · 下次复习: ${data.fsrs_result.scheduled_days.toFixed(1)}天后` : ''}
@@ -3648,17 +3695,49 @@ async function submitDictationPractice() {
             const resultClass = data.correct ? 'correct' : data.type === 'partial' ? 'partial-result' : 'incorrect';
             const resultIcon = data.correct ? '✅' : data.type === 'partial' ? '🔶' : '❌';
 
+            // Add word to session reviewed list
+            const cardId = `word_${PS.currentWord.word}`;
+            if (!S._reviewedCardIds.includes(cardId)) {
+                S._reviewedCardIds.push(cardId);
+                if (S._reviewedCardIds.length > 50) S._reviewedCardIds.shift();
+            }
+
             let detail = '';
             if (data.type === 'match') detail = '完全正确！';
             else if (data.type === 'near_correct') detail = `近似正确（相似度${Math.round(data.similarity * 100)}%）`;
             else if (data.type === 'partial') detail = `部分正确（相似度${Math.round(data.similarity * 100)}%）<br>正确: <strong>${data.word}</strong>`;
             else detail = `错误<br>正确: <strong>${data.word}</strong>`;
 
+            // Show character-level diff for wrong dictation
+            let diffHtml = '';
+            if (!data.correct && data.word && userInput) {
+                const expected = data.word.toLowerCase();
+                const typed = userInput.toLowerCase();
+                // Simple character comparison
+                let diffChars = '';
+                const maxLen = Math.max(expected.length, typed.length);
+                for (let i = 0; i < maxLen; i++) {
+                    const e = expected[i] || '';
+                    const t = typed[i] || '';
+                    if (e === t) {
+                        diffChars += `<span class="dict-char correct">${e}</span>`;
+                    } else if (e && !t) {
+                        diffChars += `<span class="dict-char missing">${e}</span>`;
+                    } else if (!e && t) {
+                        diffChars += `<span class="dict-char extra">${t}</span>`;
+                    } else {
+                        diffChars += `<span class="dict-char wrong">${t}</span><span class="dict-char expected">${e}</span>`;
+                    }
+                }
+                diffHtml = `<div class="dict-diff">${diffChars}</div>`;
+            }
+
             resultArea.innerHTML = `
             <div class="practice-result ${resultClass}">
                 <div style="font-size:28px;margin-bottom:6px;">${resultIcon}</div>
                 <div style="font-size:14px;">${detail}</div>
             </div>
+            ${diffHtml}
             <div class="practice-fsrs-result">
                 自动评级: <strong style="color:${ratingColors[data.auto_rating]}">${ratingNames[data.auto_rating]}</strong>
                 ${data.fsrs_result ? ` · 下次复习: ${data.fsrs_result.scheduled_days.toFixed(1)}天后` : ''}

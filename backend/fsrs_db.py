@@ -1270,7 +1270,7 @@ class FSRSDatabase:
         conn.close()
         return max(0, total - mastered_count)
 
-    def get_next_word_for_practice(self, user_id: str = "default", new_ratio: float = 0.7) -> Optional[dict]:
+    def get_next_word_for_practice(self, user_id: str = "default", new_ratio: float = 0.7, exclude_card_ids: List[str] = None) -> Optional[dict]:
         """获取下一个练习单词（FSRS驱动，新词优先，穿插到期复习）
         
         策略（区别于 get_next_word_for_review）：
@@ -1278,20 +1278,29 @@ class FSRSDatabase:
         - 随机混合，避免全是新词或全是复习
         - 已掌握的（REVIEW + 未到期 + 间隔>=3天）不推荐
         - 错误次数多的词优先级提升
+        - exclude_card_ids: 排除刚复习过的卡片（避免短间隔后立即重复）
         """
         now = time.time()
         conn = self._get_conn()
 
         # 获取所有未掌握的卡片
-        rows = conn.execute(
-            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type='word' AND user_id=? "
-            "AND NOT (state=2 AND due > ? AND scheduled_days >= 3) "
-            "ORDER BY CASE WHEN state=0 THEN 0 ELSE 1 END, "
-            "CASE WHEN state != 0 AND due <= ? THEN 0 ELSE 1 END, "
-            "difficulty DESC, reps ASC",
-            (user_id, now, now)
-        ).fetchall()
+        query = ("SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+                 "FROM cards WHERE card_type='word' AND user_id=? "
+                 "AND NOT (state=2 AND due > ? AND scheduled_days >= 3) ")
+        params = [user_id, now]
+        
+        # Exclude recently reviewed cards (prevent immediate re-appearance of LEARNING/RELEARNING)
+        if exclude_card_ids:
+            placeholders = ','.join(['?'] * len(exclude_card_ids))
+            query += f"AND card_id NOT IN ({placeholders}) "
+            params.extend(exclude_card_ids)
+        
+        query += ("ORDER BY CASE WHEN state=0 THEN 0 ELSE 1 END, "
+                  "CASE WHEN state != 0 AND due <= ? THEN 0 ELSE 1 END, "
+                  "difficulty DESC, reps ASC")
+        params.extend([now])
+        
+        rows = conn.execute(query, tuple(params)).fetchall()
         conn.close()
 
         if not rows:

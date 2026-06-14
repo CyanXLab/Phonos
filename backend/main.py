@@ -1369,24 +1369,24 @@ async def words_error_stats(user: dict = Depends(get_current_user)):
 
         if ew.get("pronunciation_errors", 0) > 0:
             pron_err_count = ew["pronunciation_errors"]
-            # Use error count as denominator proxy: the word was encountered in
-            # pronunciation at least pron_err_count times, likely more.
-            # Estimate: total pronunciation attempts = max(total_attempts, pron_err_count)
-            # More accurately: use error_count vs attempts where we track specifically
-            pron_attempts = max(total_attempts, pron_err_count)
+            # Use actual pronunciation total attempts from _attempt tracking
+            pron_total = ew.get("pronunciation_total", 0)
+            if pron_total <= 0:
+                pron_total = max(total_attempts, pron_err_count)
             entry["pronunciation_errors"] = pron_err_count
-            entry["pronunciation_total"] = pron_attempts
-            # Rate should reflect actual error frequency, not artificially 100%
-            # If total_attempts > pron_err_count, rate < 100%
-            entry["pronunciation_rate"] = round(pron_err_count / pron_attempts * 100, 1) if pron_attempts > 0 else 0.0
+            entry["pronunciation_total"] = pron_total
+            # Rate = errors / total attempts * 100
+            entry["pronunciation_rate"] = round(pron_err_count / pron_total * 100, 1) if pron_total > 0 else 0.0
             pron_errors.append(entry.copy())
 
         if ew.get("dictation_errors", 0) > 0:
             dict_err_count = ew["dictation_errors"]
-            dict_attempts = max(total_attempts, dict_err_count)
+            dict_total = ew.get("dictation_total", 0)
+            if dict_total <= 0:
+                dict_total = max(total_attempts, dict_err_count)
             entry["dictation_errors"] = dict_err_count
-            entry["dictation_total"] = dict_attempts
-            entry["dictation_rate"] = round(dict_err_count / dict_attempts * 100, 1) if dict_attempts > 0 else 0.0
+            entry["dictation_total"] = dict_total
+            entry["dictation_rate"] = round(dict_err_count / dict_total * 100, 1) if dict_total > 0 else 0.0
             dict_errors.append(entry.copy())
 
     # Sort by error count descending
@@ -1405,7 +1405,9 @@ async def words_error_stats(user: dict = Depends(get_current_user)):
 
 
 @app.get("/api/words/practice-next")
-async def words_practice_next(mode: str = Query("all", description="练习模式: all/pronunciation/dictation"), user: dict = Depends(get_current_user)):
+async def words_practice_next(mode: str = Query("all", description="练习模式: all/pronunciation/dictation"),
+                              exclude: str = Query("", description="排除的卡片ID（逗号分隔）"),
+                              user: dict = Depends(get_current_user)):
     """获取下一个练习单词（FSRS自动推荐，支持按错误类型过滤）
     
     与 /api/words/next-review 的区别：
@@ -1418,11 +1420,16 @@ async def words_practice_next(mode: str = Query("all", description="练习模式
     - all: 所有未掌握单词（默认）
     - pronunciation: 仅读错过的单词
     - dictation: 仅听写错过的单词
+    
+    exclude 参数：排除刚复习过的卡片ID（避免LEARNING/RELEARNING短间隔后立即重复）
     """
     user_id = user.get("id", "default")
     fsrs = get_fsrs_db()
     learning = get_learning_algorithm()
     dict_svc = get_dict_service()
+    
+    # Parse exclude list
+    exclude_ids = [x.strip() for x in exclude.split(',') if x.strip()] if exclude else []
 
     if mode == "pronunciation" or mode == "dictation":
         # 错误词优先模式：只从错误词中选择
@@ -1495,7 +1502,7 @@ async def words_practice_next(mode: str = Query("all", description="练习模式
         return result
 
     # 默认模式：所有未掌握单词
-    next_card = fsrs.get_next_word_for_practice(user_id)
+    next_card = fsrs.get_next_word_for_practice(user_id, exclude_card_ids=exclude_ids)
     if not next_card:
         return {"word": None, "message": "暂无可练习的单词", "total_reviewable": 0, "review_stats": fsrs.get_word_review_stats(user_id)}
 
@@ -1615,6 +1622,67 @@ async def words_practice_evaluate(
                 except Exception:
                     pass
 
+            # 记录发音尝试（不论对错，用于计算错误率）
+            try:
+                learning = get_learning_algorithm()
+                import sqlite3 as _sql3
+                now_ts = time.time()
+                conn_pr = _sql3.connect(learning.db_path)
+                attempt_row = conn_pr.execute(
+                    "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
+                    (user_id, word, 'pronunciation_attempt')
+                ).fetchone()
+                if attempt_row:
+                    conn_pr.execute(
+                        "UPDATE user_word_errors SET count = count + 1, last_seen = ? WHERE user_id = ? AND word = ? AND error_type = ?",
+                        (now_ts, user_id, word, 'pronunciation_attempt')
+                    )
+                else:
+                    conn_pr.execute(
+                        "INSERT INTO user_word_errors (user_id, word, error_type, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
+                        (user_id, word, 'pronunciation_attempt', now_ts, now_ts)
+                    )
+                conn_pr.commit()
+                conn_pr.close()
+            except Exception:
+                pass
+
+            # 记录音素级别的total_attempts（正确+错误）
+            try:
+                learning = get_learning_algorithm()
+                import sqlite3 as _sql3
+                now_ts = time.time()
+                conn_ph = _sql3.connect(learning.db_path)
+                error_phonemes_set = set()
+                for err in (response.get("errors") or []):
+                    ep = err.get("expected", "")
+                    if ep:
+                        error_phonemes_set.add(ep)
+                for ep in expected_phonemes:
+                    is_err = ep in error_phonemes_set
+                    row = conn_ph.execute(
+                        "SELECT total_attempts, error_count FROM user_phoneme_stats WHERE user_id = ? AND phoneme = ?",
+                        (user_id, ep)
+                    ).fetchone()
+                    if row:
+                        total, err_count = row
+                        new_total = total + 1
+                        new_err = err_count + (1 if is_err else 0)
+                        new_rate = new_err / new_total if new_total > 0 else 0
+                        conn_ph.execute(
+                            "UPDATE user_phoneme_stats SET total_attempts=?, error_count=?, error_rate=?, last_attempted=? WHERE user_id=? AND phoneme=?",
+                            (new_total, new_err, new_rate, now_ts, user_id, ep)
+                        )
+                    else:
+                        conn_ph.execute(
+                            "INSERT INTO user_phoneme_stats (user_id, phoneme, total_attempts, error_count, error_rate, last_attempted) VALUES (?, ?, ?, ?, ?, ?)",
+                            (user_id, ep, 1, 1 if is_err else 0, 1.0 if is_err else 0.0, now_ts)
+                        )
+                conn_ph.commit()
+                conn_ph.close()
+            except Exception:
+                pass
+
             response["auto_rating"] = auto_rating
             response["auto_rating_name"] = {1: "Again", 2: "Hard", 3: "Good", 4: "Easy"}[auto_rating]
             response["fsrs_result"] = fsrs_result
@@ -1677,13 +1745,38 @@ async def words_dictation_practice(data: dict, user: dict = Depends(get_current_
     fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
     fsrs_result = fsrs.review_card(card_id, auto_rating, card_type="word", user_id=user_id)
 
-    # 记录听写错误（非完全正确）
-    if not correct or result_type == "near_correct":
+    # 记录听写错误（仅真正错误时记录，near_correct不算错误）
+    if not correct:
         learning = get_learning_algorithm()
         try:
             learning.record_dictation_errors(user_id, [word])
         except Exception:
             pass
+
+    # Record dictation attempt (both correct and incorrect) for accurate rate
+    try:
+        import sqlite3 as _sql3_conn
+        learning = get_learning_algorithm()
+        now = time.time()
+        conn2 = _sql3_conn.connect(learning.db_path)
+        attempt_row = conn2.execute(
+            "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
+            (user_id, word, 'dictation_attempt')
+        ).fetchone()
+        if attempt_row:
+            conn2.execute(
+                "UPDATE user_word_errors SET count = count + 1, last_seen = ? WHERE user_id = ? AND word = ? AND error_type = ?",
+                (now, user_id, word, 'dictation_attempt')
+            )
+        else:
+            conn2.execute(
+                "INSERT INTO user_word_errors (user_id, word, error_type, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
+                (user_id, word, 'dictation_attempt', now, now)
+            )
+        conn2.commit()
+        conn2.close()
+    except Exception:
+        pass
 
     return {
         "word": word,

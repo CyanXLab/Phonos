@@ -191,10 +191,38 @@ class LearningAlgorithm:
                     )
 
         # 3. Update user_phoneme_stats
+        # 3a. Collect ALL expected phonemes from errors (for error counting)
+        error_phonemes = set()
         for err in errors:
             phoneme = err.get("expected", "")
-            if not phoneme:
-                continue
+            if phoneme:
+                error_phonemes.add(phoneme)
+
+        # 3b. Collect ALL phonemes from word_scores (for total_attempts tracking)
+        #     We need g2p to get phonemes for words that scored well (correct pronunciation)
+        all_expected_phonemes = set()
+        try:
+            from g2p_service import get_g2p_service
+            g2p = get_g2p_service()
+            for ws in word_scores:
+                word = ws.get("word", "").lower()
+                if not word:
+                    continue
+                word_phonemes = g2p.text_to_phonemes(word)
+                for p in word_phonemes:
+                    if p:
+                        all_expected_phonemes.add(p)
+        except Exception:
+            # Fallback: only track error phonemes
+            all_expected_phonemes = error_phonemes.copy()
+
+        # If no word_scores phonemes available, at least include error phonemes
+        if not all_expected_phonemes:
+            all_expected_phonemes = error_phonemes.copy()
+
+        # 3c. Update stats for ALL expected phonemes
+        for phoneme in all_expected_phonemes:
+            is_error = phoneme in error_phonemes
             row = conn.execute(
                 "SELECT total_attempts, error_count FROM user_phoneme_stats WHERE user_id = ? AND phoneme = ?",
                 (user_id, phoneme)
@@ -203,8 +231,8 @@ class LearningAlgorithm:
             if row:
                 total, err_count = row
                 new_total = total + 1
-                new_err = err_count + 1
-                new_rate = new_err / new_total
+                new_err = err_count + (1 if is_error else 0)
+                new_rate = new_err / new_total if new_total > 0 else 0
                 conn.execute(
                     "UPDATE user_phoneme_stats SET total_attempts=?, error_count=?, error_rate=?, last_attempted=? WHERE user_id=? AND phoneme=?",
                     (new_total, new_err, new_rate, now, user_id, phoneme)
@@ -212,12 +240,31 @@ class LearningAlgorithm:
             else:
                 conn.execute(
                     "INSERT INTO user_phoneme_stats (user_id, phoneme, total_attempts, error_count, error_rate, last_attempted) VALUES (?, ?, ?, ?, ?, ?)",
-                    (user_id, phoneme, 1, 1, 1.0, now)
+                    (user_id, phoneme, 1, 1 if is_error else 0, 1.0 if is_error else 0.0, now)
                 )
 
-        # Also update total_attempts for phonemes that were correctly pronounced
-        # (We can infer from word_scores - phonemes in words that scored well)
-        # For simplicity, we don't track every correctly produced phoneme individually
+        # 3d. Also record pronunciation attempts for words (total, not just errors)
+        #     This is crucial for accurate error rate calculation at word level
+        for ws in word_scores:
+            word = ws.get("word", "").lower()
+            accuracy = ws.get("accuracy", 0)
+            if not word:
+                continue
+            # Record pronunciation attempt (whether correct or not)
+            pron_attempt_row = conn.execute(
+                "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
+                (user_id, word, 'pronunciation_attempt')
+            ).fetchone()
+            if pron_attempt_row:
+                conn.execute(
+                    "UPDATE user_word_errors SET count = count + 1, last_seen = ? WHERE user_id = ? AND word = ? AND error_type = ?",
+                    (now, user_id, word, 'pronunciation_attempt')
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO user_word_errors (user_id, word, error_type, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
+                    (user_id, word, 'pronunciation_attempt', now, now)
+                )
 
         conn.commit()
         conn.close()
@@ -842,8 +889,10 @@ class LearningAlgorithm:
         - pronunciation_errors: count of pronunciation error occurrences
         - dictation_errors: count of dictation error occurrences
         - total_errors: sum of all error types
-        - pronunciation_attempts: estimated pronunciation attempts (error count + correct attempts)
-        - dictation_attempts: estimated dictation attempts
+        - pronunciation_total: total pronunciation attempts (from pronunciation_attempt records)
+        - dictation_total: total dictation attempts (from dictation_attempt records)
+        - pronunciation_rate: error rate as percentage
+        - dictation_rate: error rate as percentage
         """
         conn = _get_conn(self.db_path)
         if error_type:
@@ -862,6 +911,10 @@ class LearningAlgorithm:
         seen_words = set()
         for r in rows:
             word = r[0]
+            etype = r[1]
+            # Skip internal tracking types
+            if etype.endswith('_attempt'):
+                continue
             if word not in seen_words:
                 seen_words.add(word)
                 result.append({
@@ -872,10 +925,11 @@ class LearningAlgorithm:
                     "last_seen": r[4],
                 })
 
-        # Fill in error counts and also estimate total attempts per type
+        # Fill in error counts and total attempts per type
         conn = _get_conn(self.db_path)
         for item in result:
             for etype in ['dictation', 'pronunciation']:
+                # Error count
                 row = conn.execute(
                     "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
                     (user_id, item["word"], etype)
@@ -887,13 +941,33 @@ class LearningAlgorithm:
                     item["pronunciation_errors"] = count
                 item["total_errors"] += count
 
-            # Also get total attempts from user_word_progress for better rate calculation
-            progress_row = conn.execute(
-                "SELECT attempts FROM user_word_progress WHERE user_id = ? AND word = ?",
-                (user_id, item["word"])
-            ).fetchone()
-            total_attempts = progress_row[0] if progress_row else 0
-            item["total_attempts"] = total_attempts
+                # Total attempts (from _attempt tracking records)
+                attempt_row = conn.execute(
+                    "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
+                    (user_id, item["word"], f"{etype}_attempt")
+                ).fetchone()
+                attempt_count = attempt_row[0] if attempt_row else 0
+                
+                # Fallback: use user_word_progress.attempts if no _attempt records
+                if attempt_count == 0:
+                    progress_row = conn.execute(
+                        "SELECT attempts FROM user_word_progress WHERE user_id = ? AND word = ?",
+                        (user_id, item["word"])
+                    ).fetchone()
+                    attempt_count = progress_row[0] if progress_row else count
+                
+                # Ensure total >= error count
+                total = max(attempt_count, count)
+                
+                if etype == 'dictation':
+                    item["dictation_total"] = total
+                    item["dictation_rate"] = round(count / total * 100, 1) if total > 0 else 0.0
+                else:
+                    item["pronunciation_total"] = total
+                    item["pronunciation_rate"] = round(count / total * 100, 1) if total > 0 else 0.0
+
+            # Also keep total_attempts for backward compatibility
+            item["total_attempts"] = max(item.get("pronunciation_total", 0), item.get("dictation_total", 0))
         conn.close()
 
         return result

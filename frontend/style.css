@@ -2583,3 +2583,121 @@ body {
 [data-theme="dark"] .auth-section {
     background: var(--card);
 }
+
+/* ============================================================
+   Practice error display styles
+   ============================================================ */
+
+/* Word error chips - shown after pronunciation practice */
+.practice-word-errors {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
+    padding: 8px;
+    background: rgba(239,68,68,0.06);
+    border-radius: 8px;
+}
+.word-error-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+}
+.word-error-chip.wrong {
+    background: rgba(239,68,68,0.15);
+    color: #ef4444;
+}
+.word-error-chip.partial {
+    background: rgba(245,158,11,0.15);
+    color: #f59e0b;
+}
+.word-error-chip small {
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+/* Phoneme error chips - shown after pronunciation practice */
+.practice-phoneme-errors {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 6px 0;
+    padding: 6px 8px;
+    background: rgba(139,92,246,0.06);
+    border-radius: 8px;
+}
+.phoneme-error-chip {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: 'Courier New', monospace;
+    background: rgba(139,92,246,0.12);
+    color: #8b5cf6;
+}
+
+/* Dictation diff display - character-level comparison */
+.dict-diff {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    margin: 8px 0;
+    padding: 10px;
+    background: rgba(0,0,0,0.03);
+    border-radius: 8px;
+    font-size: 18px;
+    font-family: 'Courier New', monospace;
+    letter-spacing: 1px;
+    justify-content: center;
+}
+[data-theme="dark"] .dict-diff {
+    background: rgba(255,255,255,0.05);
+}
+.dict-char {
+    display: inline-block;
+    padding: 2px 3px;
+    border-radius: 3px;
+    position: relative;
+}
+.dict-char.correct {
+    color: var(--ok);
+}
+.dict-char.wrong {
+    color: #ef4444;
+    background: rgba(239,68,68,0.12);
+    text-decoration: line-through;
+}
+.dict-char.expected {
+    color: var(--ok);
+    background: rgba(34,197,94,0.12);
+}
+.dict-char.missing {
+    color: #f59e0b;
+    background: rgba(245,158,11,0.12);
+    text-decoration: underline;
+    text-decoration-style: wavy;
+    text-decoration-color: #f59e0b;
+}
+.dict-char.extra {
+    color: #8b5cf6;
+    background: rgba(139,92,246,0.12);
+    font-style: italic;
+}
+
+/* Dark theme for practice errors */
+[data-theme="dark"] .practice-word-errors {
+    background: rgba(239,68,68,0.1);
+}
+[data-theme="dark"] .practice-phoneme-errors {
+    background: rgba(139,92,246,0.1);
+}
+[data-theme="dark"] .word-error-chip.wrong {
+    background: rgba(239,68,68,0.2);
+}
+[data-theme="dark"] .word-error-chip.partial {
+    background: rgba(245,158,11,0.2);
+}
