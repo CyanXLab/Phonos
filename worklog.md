@@ -180,3 +180,23 @@ Stage Summary:
 - FSRS-6 algorithm verified against official spec
 - Semantic network built from 100+ sentences + 50K dictionary
 - Frontend updated with all new UI components
+
+---
+Task ID: 1
+Agent: Main Agent
+Task: 研究Echoic优秀功能并融入Phonos + 上传代码到GitHub
+
+Work Log:
+- 深入研究Echoic项目(https://github.com/xialeistudio/echoic)的8个高价值功能
+- 识别出可借鉴的6个功能：A/B对比播放、练习热力图、分数校准、音素颜色编码、句子收藏、练习历史API
+- 识别出应避免的功能：WhisperX/wav2vec2服务器管线、PostgreSQL+SQLAlchemy栈、WaveSurfer.js
+- 实现6个Echoic借鉴功能，修改4个核心文件(frontend/app.js, frontend/index.html, frontend/style.css, backend/main.py)
+- 清理.gitignore，移除不应入库的大文件(full_dict.json 135MB)和临时目录
+- 从Git历史中清除大文件
+- 强制推送最新完整代码到GitHub(CyanXLab/Phonos)
+
+Stage Summary:
+- 新增功能：A/B对比播放(playAB)、GitHub风格练习热力图(renderHeatmap)、分数校准(calibrateScore)、音素颜色编码、句子收藏(btnBookmark)、练习历史API(/api/stats/history)、热力图API(/api/stats/heatmap)、句子状态API(/api/sentence-state)
+- 代码清理：移除download/、tool-results/、__pycache__/、backend_extracted/、*.db等
+- GitHub推送成功：https://github.com/CyanXLab/Phonos
+- 提交：feat: 借鉴Echoic优秀功能 - A/B对比播放、练习热力图、分数校准、音素颜色编码、句子收藏、练习历史API
