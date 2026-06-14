@@ -1,2 +1,11 @@
 skills/
 node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+tool-results/
+download/
+backend_extracted/
+agent-ctx/
+.env

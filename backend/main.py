@@ -2793,6 +2793,142 @@ async def get_enhanced_stats(user: dict = Depends(get_current_user)):
     return result
 
 
+@app.get("/api/stats/heatmap")
+async def get_practice_heatmap(user: dict = Depends(get_current_user)):
+    """获取练习热力图数据（过去365天每日练习次数和平均分）"""
+    user_id = user.get("id", "default")
+    learning = get_learning_algorithm()
+    
+    try:
+        import sqlite3
+        conn = sqlite3.connect(learning.db_path)
+        # Get daily practice counts for the last 365 days
+        rows = conn.execute("""
+            SELECT DATE(evaluated_at) as date, 
+                   COUNT(*) as count, 
+                   AVG(overall_score) as avg_score
+            FROM user_evaluations 
+            WHERE user_id = ? AND evaluated_at >= DATE('now', '-365 days')
+            GROUP BY DATE(evaluated_at)
+            ORDER BY date
+        """, (user_id,)).fetchall()
+        conn.close()
+        
+        heatmap = {}
+        for r in rows:
+            heatmap[r[0]] = {"count": r[1], "avg_score": round(r[2], 1) if r[2] else 0}
+        
+        return {"heatmap": heatmap}
+    except Exception as e:
+        return {"heatmap": {}}
+
+
+@app.get("/api/stats/history")
+async def get_practice_history(
+    limit: int = Query(20, description="返回记录数量"),
+    user: dict = Depends(get_current_user)
+):
+    """获取练习历史记录"""
+    user_id = user.get("id", "default")
+    learning = get_learning_algorithm()
+    
+    try:
+        import sqlite3
+        conn = sqlite3.connect(learning.db_path)
+        rows = conn.execute("""
+            SELECT sentence_id, overall_score, pronunciation_score, completeness_score, 
+                   fluency_score, evaluated_at, duration
+            FROM user_evaluations 
+            WHERE user_id = ? 
+            ORDER BY evaluated_at DESC 
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+        conn.close()
+        
+        history = []
+        for r in rows:
+            history.append({
+                "sentence_id": r[0],
+                "overall_score": round(r[1], 1),
+                "pronunciation_score": round(r[2], 1),
+                "completeness_score": round(r[3], 1),
+                "fluency_score": round(r[4], 1),
+                "evaluated_at": r[5],
+                "duration": r[6],
+            })
+        
+        return {"history": history}
+    except Exception as e:
+        return {"history": []}
+
+
+@app.get("/api/sentence-state")
+async def get_sentence_state(card_id: str = Query(...), user: dict = Depends(get_current_user)):
+    """获取句子状态（收藏/已掌握）"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+        import sqlite3
+        conn = sqlite3.connect(fsrs.db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS card_states (
+                card_id TEXT, user_id TEXT, bookmarked INTEGER DEFAULT 0, mastered INTEGER DEFAULT 0,
+                PRIMARY KEY (card_id, user_id)
+            )
+        """)
+        row = conn.execute(
+            "SELECT bookmarked, mastered FROM card_states WHERE card_id=? AND user_id=?",
+            (card_id, user_id)
+        ).fetchone()
+        conn.close()
+        if row:
+            return {"bookmarked": bool(row[0]), "mastered": bool(row[1])}
+        return {"bookmarked": False, "mastered": False}
+    except:
+        return {"bookmarked": False, "mastered": False}
+
+
+@app.post("/api/sentence-state")
+async def set_sentence_state(data: dict, user: dict = Depends(get_current_user)):
+    """设置句子状态（收藏/已掌握）"""
+    user_id = user.get("id", "default")
+    card_id = data.get("card_id", "")
+    bookmarked = data.get("bookmarked")
+    mastered = data.get("mastered")
+    
+    if not card_id:
+        raise HTTPException(status_code=400, detail="缺少 card_id")
+    
+    try:
+        fsrs = get_fsrs_db()
+        import sqlite3
+        conn = sqlite3.connect(fsrs.db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS card_states (
+                card_id TEXT, user_id TEXT, bookmarked INTEGER DEFAULT 0, mastered INTEGER DEFAULT 0,
+                PRIMARY KEY (card_id, user_id)
+            )
+        """)
+        
+        if bookmarked is not None:
+            conn.execute("""
+                INSERT OR REPLACE INTO card_states (card_id, user_id, bookmarked, mastered)
+                VALUES (?, ?, ?, COALESCE((SELECT mastered FROM card_states WHERE card_id=? AND user_id=?), 0))
+            """, (card_id, user_id, int(bookmarked), card_id, user_id))
+        
+        if mastered is not None:
+            conn.execute("""
+                INSERT OR REPLACE INTO card_states (card_id, user_id, bookmarked, mastered)
+                VALUES (?, ?, COALESCE((SELECT bookmarked FROM card_states WHERE card_id=? AND user_id=?), 0), ?)
+            """, (card_id, user_id, card_id, user_id, int(mastered)))
+        
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # 挂载前端
 frontend_path = Path(__file__).parent.parent / "frontend"
 if frontend_path.exists():

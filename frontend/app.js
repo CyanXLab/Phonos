@@ -79,6 +79,8 @@ const S = {
     // --- Prediction calibration state ---
     predictionScore: null,       // User's prediction score (0-100)
     calibrationEnabled: false,   // Auto-detected from /api/metacognition/profile
+    abPhase: null,               // 'A' | 'B' | null - A/B compare playback phase
+    bookmarked: false,           // Whether current sentence is bookmarked
     // --- Settings state ---
     settings: null,              // Cached settings from /api/settings
 };
@@ -336,6 +338,8 @@ const el = {
     calDeviation: $('calDeviation'),
     semanticNetworkSection: $('semanticNetworkSection'),
     semanticNetworkContent: $('semanticNetworkContent'),
+    btnAB: $('btnAB'),
+    btnBookmark: $('btnBookmark'),
 };
 
 // ============================================================
@@ -644,10 +648,20 @@ function renderSentence() {
     el.resultCard.style.display = 'none';
     el.loadingCard.style.display = 'none';
     el.playbackBar.style.display = 'none';
+    if (el.btnAB) el.btnAB.style.display = 'none';
     S.recordedBlob = null;
     S.recordedUrl = null;
     // Hide semantic network when new sentence loads
     if (el.semanticNetworkSection) el.semanticNetworkSection.style.display = 'none';
+
+    // Bookmark state
+    if (S.sentence) {
+        const cardId = `sentence_${S.sentence.id}`;
+        fetchWithAuth(`${API}/api/sentence-state?card_id=${encodeURIComponent(cardId)}`).then(r => r.ok ? r.json() : Promise.reject()).then(data => {
+            S.bookmarked = data.bookmarked || false;
+            updateBookmarkUI();
+        }).catch(() => { S.bookmarked = false; updateBookmarkUI(); });
+    }
 }
 
 // ============================================================
@@ -1319,6 +1333,8 @@ function bindEvents() {
     // Recording
     el.btnRecord.addEventListener('click', toggleRecording);
     el.btnPlayback.addEventListener('click', togglePlayback);
+    if (el.btnAB) el.btnAB.addEventListener('click', playAB);
+    if (el.btnBookmark) el.btnBookmark.addEventListener('click', toggleBookmark);
     el.btnSubmit.addEventListener('click', submitEvaluation);
 
     el.btnRetry.addEventListener('click', () => {
@@ -1578,6 +1594,7 @@ function onRecordStop() {
             S.recordedBlob = wavBlob;
             S.recordedUrl = URL.createObjectURL(wavBlob);
             el.playbackBar.style.display = 'flex';
+            if (el.btnAB) el.btnAB.style.display = '';
             el.playbackAudio.src = S.recordedUrl;
             el.playbackFill.style.width = '0%';
             el.playbackTime.textContent = '0:00';
@@ -1592,6 +1609,7 @@ function onRecordStop() {
     if (S.recordedBlob.size < 1000) { alert('录音太短，请重试'); return; }
 
     el.playbackBar.style.display = 'flex';
+    if (el.btnAB) el.btnAB.style.display = '';
     el.playbackAudio.src = S.recordedUrl;
     el.playbackFill.style.width = '0%';
     el.playbackTime.textContent = '0:00';
@@ -1796,19 +1814,103 @@ async function submitEvaluation() {
 }
 
 // ============================================================
+// A/B Compare Playback
+// ============================================================
+function playAB() {
+    if (!S.recordedUrl) return;
+    S.abPhase = 'A';
+    el.btnAB.classList.add('active');
+    
+    // Play TTS first (standard pronunciation)
+    speakTTS();
+    
+    // After TTS ends, play user recording
+    const checkTTS = setInterval(() => {
+        if (S.ttsMode === 'browser') {
+            if (!window.speechSynthesis.speaking) {
+                clearInterval(checkTTS);
+                S.abPhase = 'B';
+                el.playbackAudio.currentTime = 0;
+                el.playbackAudio.play();
+                S.playbackPlaying = true;
+                el.btnPlayback.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+            }
+        } else {
+            // Server TTS mode
+            if (el.ttsAudio.paused || el.ttsAudio.ended) {
+                clearInterval(checkTTS);
+                setTimeout(() => {
+                    S.abPhase = 'B';
+                    el.playbackAudio.currentTime = 0;
+                    el.playbackAudio.play();
+                    S.playbackPlaying = true;
+                    el.btnPlayback.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+                }, 300); // small gap between A and B
+            }
+        }
+    }, 100);
+    
+    el.playbackAudio.onended = () => {
+        S.playbackPlaying = false;
+        S.abPhase = null;
+        el.btnAB.classList.remove('active');
+        el.btnPlayback.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+        el.playbackFill.style.width = '0%';
+    };
+}
+
+// ============================================================
+// Bookmark Functions
+// ============================================================
+async function toggleBookmark() {
+    if (!S.sentence) return;
+    const cardId = `sentence_${S.sentence.id}`;
+    try {
+        const r = await fetchWithAuth(`${API}/api/sentence-state`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card_id: cardId, bookmarked: !S.bookmarked }),
+        });
+        if (r.ok) {
+            S.bookmarked = !S.bookmarked;
+            updateBookmarkUI();
+        }
+    } catch {}
+}
+
+function updateBookmarkUI() {
+    if (!el.btnBookmark) return;
+    el.btnBookmark.style.display = '';
+    const svg = S.bookmarked 
+        ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>'
+        : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>';
+    el.btnBookmark.innerHTML = svg;
+    el.btnBookmark.style.color = S.bookmarked ? 'var(--warn)' : '';
+}
+
+// ============================================================
 // Results
 // ============================================================
+function calibrateScore(raw) {
+    // CTC forced-alignment scores typically land in 30-60% range even for correct pronunciation.
+    // Raising to 0.25 power remaps typical correct range (~30-60%) to ~74-88%.
+    if (raw < 0) return 0;
+    if (raw > 100) return 100;
+    return Math.min(100, Math.pow(raw, 0.25));
+}
+
 function renderResults(d) {
     el.resultCard.style.display = '';
 
     S.fsrsRated = false;
     document.querySelectorAll('.fsrs-btn').forEach(btn => btn.classList.remove('selected'));
 
-    animNum(el.overallScore, d.scores.overall, 1200);
-    animRing(d.scores.overall);
-    animSub(el.pronVal, el.pronFill, d.scores.pronunciation);
-    animSub(el.compVal, el.compFill, d.scores.completeness);
-    animSub(el.fluVal, el.fluFill, d.scores.fluency);
+    const calOverall = Math.round(calibrateScore(d.scores.overall));
+    animNum(el.overallScore, calOverall, 1200);
+    animRing(calOverall);
+    animSub(el.pronVal, el.pronFill, Math.round(calibrateScore(d.scores.pronunciation)));
+    animSub(el.compVal, el.compFill, Math.round(calibrateScore(d.scores.completeness)));
+    animSub(el.fluVal, el.fluFill, Math.round(calibrateScore(d.scores.fluency)));
 
     renderWordScores(d.words || []);
     renderPhonemes(d);
@@ -1846,8 +1948,9 @@ function animSub(valEl, fillEl, v) {
 
 function renderWordScores(words) {
     el.wordScoreGrid.innerHTML = words.map(w => {
-        const c = w.accuracy >= 80 ? 'hi' : w.accuracy >= 50 ? 'md' : 'lo';
-        return `<div class="ws-item${w.has_error ? ' err' : ''}"><div class="ws-word">${w.word}</div><div class="ws-acc ${c}">${w.accuracy}%</div></div>`;
+        const calibratedAcc = Math.round(calibrateScore(w.accuracy));
+        const c = calibratedAcc >= 80 ? 'hi' : calibratedAcc >= 50 ? 'md' : 'lo';
+        return `<div class="ws-item${w.has_error ? ' err' : ''}"><div class="ws-word">${w.word}</div><div class="ws-acc ${c}">${calibratedAcc}%</div></div>`;
     }).join('');
 }
 
@@ -1863,17 +1966,30 @@ function renderPhonemes(d) {
     });
 
     el.phExpected.innerHTML = exp.map((p, i) => {
-        const cls = errPos.has(i) ? 'bad' : 'ok';
+        const err = errPos.get(i);
+        let cls = 'ok';
+        let bgColor = 'background:rgba(34,197,94,0.08);';
+        if (err) {
+            if (err.type === 'substitution') {
+                cls = 'bad';
+                bgColor = 'background:rgba(239,68,68,0.12);';
+            } else if (err.type === 'deletion') {
+                cls = 'missing';
+                bgColor = 'background:rgba(245,158,11,0.12);';
+            }
+        }
         const ipa = ARPABET_TO_IPA[p] || '';
         const ipaLabel = ipa ? `/${ipa}/` : '';
-        return `<span class="ph-chip ${cls} clickable" title="${ipaLabel} - 点击听发音" data-arpabet="${p}" onclick="pronounceResultPhoneme(this)">${ipa ? ipa : p}<span style="font-size:9px;opacity:0.6;margin-left:2px;">${p}</span></span>`;
+        return `<span class="ph-chip ${cls} clickable" style="${bgColor}" title="${ipaLabel} - 点击听发音" data-arpabet="${p}" onclick="pronounceResultPhoneme(this)">${ipa ? ipa : p}<span style="font-size:9px;opacity:0.6;margin-left:2px;">${p}</span></span>`;
     }).join('');
 
     el.phActual.innerHTML = act.map(p => {
-        const cls = exp.includes(p) ? 'ok' : 'extra';
+        const isMatch = exp.includes(p);
+        const cls = isMatch ? 'ok' : 'extra';
+        const bgColor = isMatch ? 'background:rgba(34,197,94,0.08);' : 'background:rgba(239,68,68,0.08);';
         const ipa = ARPABET_TO_IPA[p] || '';
         const ipaLabel = ipa ? `/${ipa}/` : '';
-        return `<span class="ph-chip ${cls} clickable" title="${ipaLabel} - 点击听发音" data-arpabet="${p}" onclick="pronounceResultPhoneme(this)">${ipa ? ipa : p}<span style="font-size:9px;opacity:0.6;margin-left:2px;">${p}</span></span>`;
+        return `<span class="ph-chip ${cls} clickable" style="${bgColor}" title="${ipaLabel} - 点击听发音" data-arpabet="${p}" onclick="pronounceResultPhoneme(this)">${ipa ? ipa : p}<span style="font-size:9px;opacity:0.6;margin-left:2px;">${p}</span></span>`;
     }).join('');
 }
 
@@ -2348,6 +2464,22 @@ function renderStatsContent(stats) {
             </div>
         </div>
         ` : ''}
+
+        <!-- 练习热力图 -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsHeatmapCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    练习热力图
+                </h4>
+                <span class="stats-collapse-arrow" id="statsHeatmapCollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsHeatmapCollapse">
+                <div class="heatmap-container" id="heatmapContainer">
+                    <div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">加载热力图...</div>
+                </div>
+            </div>
+        </div>
     `;
 
     // Load enhanced stats sections asynchronously
@@ -2386,6 +2518,79 @@ function toggleStatsCollapse(sectionId) {
     const arrowId = sectionId.replace('Collapse', 'CollapseArrow');
     const arrow = document.getElementById(arrowId);
     if (arrow) arrow.style.transform = isCollapsed ? '' : 'rotate(-90deg)';
+}
+
+// ============================================================
+// Heatmap Rendering
+// ============================================================
+function renderHeatmap(container, heatmapData) {
+    const COLORS = ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'];
+    const now = new Date();
+    const days = 365;
+    
+    // Build date array for last 365 days
+    const dates = [];
+    for (let i = days - 1; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const key = d.toISOString().slice(0, 10);
+        dates.push({ date: key, day: d.getDay(), count: heatmapData[key]?.count || 0, avg: heatmapData[key]?.avg_score || 0 });
+    }
+    
+    // Calculate total and streak
+    const totalDays = dates.filter(d => d.count > 0).length;
+    const totalPractice = dates.reduce((s, d) => s + d.count, 0);
+    
+    // Current streak
+    let streak = 0;
+    for (let i = dates.length - 1; i >= 0; i--) {
+        if (dates[i].count > 0) streak++;
+        else break;
+    }
+    
+    // Build month labels
+    const months = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+    const monthLabels = [];
+    let lastMonth = -1;
+    dates.forEach((d, i) => {
+        const m = new Date(d.date).getMonth();
+        const week = Math.floor(i / 7);
+        if (m !== lastMonth) {
+            monthLabels.push({ label: months[m], week });
+            lastMonth = m;
+        }
+    });
+    
+    // Render
+    let html = `
+    <div class="heatmap-summary">
+        <span>${totalPractice} 次练习</span>
+        <span>过去一年 ${totalDays} 天活跃</span>
+        ${streak > 0 ? `<span style="color:var(--ok);">🔥 当前连续 ${streak} 天</span>` : ''}
+    </div>
+    <div class="heatmap-wrap">
+        <div class="heatmap-months">${monthLabels.map(m => `<span style="grid-column:${m.week + 1}">${m.label}</span>`).join('')}</div>
+        <div class="heatmap-grid">
+            <div class="heatmap-weekdays">
+                <span>一</span><span></span><span>三</span><span></span><span>五</span><span></span>
+            </div>
+            <div class="heatmap-cells">`;
+    
+    dates.forEach(d => {
+        const level = d.count === 0 ? 0 : d.count <= 1 ? 1 : d.count <= 3 ? 2 : d.count <= 5 ? 3 : 4;
+        const title = `${d.date}: ${d.count} 次练习${d.avg > 0 ? `，平均 ${d.avg} 分` : ''}`;
+        html += `<span class="heatmap-cell level-${level}" title="${title}"></span>`;
+    });
+    
+    html += `</div></div></div>
+        <div class="heatmap-legend">
+            <span>少</span>
+            ${COLORS.map(c => `<span class="heatmap-cell" style="background:${c};"></span>`).join('')}
+            <span>多</span>
+        </div>
+    </div>`;
+    
+    container.innerHTML = html;
 }
 
 // ============================================================
@@ -2480,6 +2685,18 @@ async function loadEnhancedStatsSections(stats) {
             }
         } catch { /* degrade */ }
     }
+
+    // Load heatmap data
+    try {
+        const r = await fetchWithAuth(`${API}/api/stats/heatmap`);
+        if (r.ok) {
+            const data = await r.json();
+            const container = document.getElementById('heatmapContainer');
+            if (container && data.heatmap) {
+                renderHeatmap(container, data.heatmap);
+            }
+        }
+    } catch { /* degrade */ }
 }
 
 // ============================================================
