@@ -2606,6 +2606,64 @@ function renderStatsContent(stats) {
         </div>
         ` : ''}
 
+        <!-- 每日目标 & 连续学习 Section -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsDailyGoalCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                    每日目标
+                </h4>
+                <div class="stats-section-summary">
+                    <span class="stats-badge ok" id="dailyGoalBadge">加载中...</span>
+                    <span class="stats-collapse-arrow" id="statsDailyGoalCollapseArrow">▼</span>
+                </div>
+            </div>
+            <div class="stats-section-body" id="statsDailyGoalCollapse">
+                <div id="dailyGoalContent">
+                    <div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">加载每日目标...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 复习预报 Section -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsForecastCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    复习预报
+                </h4>
+                <span class="stats-collapse-arrow" id="statsForecastCollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsForecastCollapse">
+                <div id="forecastContent">
+                    <div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">加载预报...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 数据管理 Section -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsDataMgmtCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    数据管理
+                </h4>
+                <span class="stats-collapse-arrow" id="statsDataMgmtCollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsDataMgmtCollapse">
+                <div id="dataMgmtContent">
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;">
+                        <button class="btn-practice-check" onclick="exportMyData()" style="flex:1;min-width:120px;">📦 导出学习数据</button>
+                        <label class="btn-practice-check" style="flex:1;min-width:120px;cursor:pointer;text-align:center;">
+                            📥 导入学习数据
+                            <input type="file" accept=".json" onchange="importMyData(event)" style="display:none;">
+                        </label>
+                    </div>
+                    <p style="font-size:11px;color:var(--text3);margin-top:8px;">导出数据包含所有学习记录、FSRS进度和收藏单词，可用于备份或迁移到其他设备。</p>
+                </div>
+            </div>
+        </div>
+
         <!-- 成就系统 -->
         <div class="stats-section">
             <div class="stats-section-header" onclick="toggleStatsCollapse('statsAchievementCollapse')">
@@ -3007,6 +3065,92 @@ async function loadEnhancedStatsSections(stats) {
                     html = '<p style="font-size:13px;color:var(--text3);padding:8px 0;">练习更多内容后，系统将为你生成个性化建议</p>';
                 }
                 el.innerHTML = html;
+            }
+        }
+    } catch { /* degrade */ }
+
+    // Load daily goal + streak
+    try {
+        const [goalR, streakR] = await Promise.all([
+            fetchWithAuth(`${API}/api/daily-goal`),
+            fetchWithAuth(`${API}/api/streak`)
+        ]);
+        const goal = goalR.ok ? await goalR.json() : null;
+        const streak = streakR.ok ? await streakR.json() : null;
+        const el = document.getElementById('dailyGoalContent');
+        const badgeEl = document.getElementById('dailyGoalBadge');
+        if (el) {
+            const streakDays = streak?.current || 0;
+            const longestStreak = streak?.longest_streak || streak?.longest || 0;
+            const reviewProg = goal?.review_progress || 0;
+            const newProg = goal?.new_progress || 0;
+            const completedReviews = goal?.completed_reviews || 0;
+            const targetReviews = goal?.target_reviews || 20;
+            const completedNew = goal?.completed_new || 0;
+            const targetNew = goal?.target_new || 5;
+            const overallProg = Math.round((reviewProg + newProg) / 2 * 100);
+
+            if (badgeEl) badgeEl.textContent = overallProg >= 100 ? '✅ 已完成' : `${overallProg}%`;
+
+            el.innerHTML = `
+                <div style="margin-bottom:12px;">
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                        <span style="font-size:28px;">${streakDays > 0 ? '🔥' : '💡'}</span>
+                        <div>
+                            <div style="font-size:18px;font-weight:800;color:var(--pri);">${streakDays}天</div>
+                            <div style="font-size:11px;color:var(--text3);">最长连续 ${longestStreak} 天 · 累计 ${streak?.total_days || 0} 天</div>
+                        </div>
+                    </div>
+                </div>
+                <div style="margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                        <span>复习进度</span>
+                        <span style="color:var(--pri);font-weight:600;">${completedReviews}/${targetReviews}</span>
+                    </div>
+                    <div style="height:8px;background:var(--bg2);border-radius:4px;overflow:hidden;">
+                        <div style="height:100%;width:${Math.round(reviewProg * 100)}%;background:var(--pri);border-radius:4px;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+                <div>
+                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                        <span>新词学习</span>
+                        <span style="color:var(--ok);font-weight:600;">${completedNew}/${targetNew}</span>
+                    </div>
+                    <div style="height:8px;background:var(--bg2);border-radius:4px;overflow:hidden;">
+                        <div style="height:100%;width:${Math.round(newProg * 100)}%;background:var(--ok);border-radius:4px;transition:width 0.5s;"></div>
+                    </div>
+                </div>
+                <p style="font-size:11px;color:var(--text3);margin-top:8px;">每天完成目标，保持连续学习！可在设置中调整目标数量。</p>
+            `;
+        }
+    } catch { /* degrade */ }
+
+    // Load forecast
+    try {
+        const r = await fetchWithAuth(`${API}/api/forecast?days=14`);
+        if (r.ok) {
+            const data = await r.json();
+            const el = document.getElementById('forecastContent');
+            const forecast = data.forecast || [];
+            if (el && forecast.length > 0) {
+                const maxCount = Math.max(...forecast.map(f => f.total), 1);
+                el.innerHTML = `
+                    <div style="display:flex;align-items:flex-end;gap:3px;height:80px;margin-bottom:6px;">
+                        ${forecast.map(f => {
+                            const h = Math.max(2, (f.total / maxCount) * 100);
+                            const color = f.total === 0 ? 'var(--bg2)' : f.total <= 3 ? 'var(--ok)' : f.total <= 8 ? 'var(--pri)' : 'var(--warn)';
+                            const dayLabel = f.date.slice(5); // MM-DD
+                            return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;" title="${f.date}: ${f.total}个复习">
+                                <span style="font-size:9px;color:var(--text3);">${f.total || ''}</span>
+                                <div style="width:100%;height:${h}%;background:${color};border-radius:2px;min-height:2px;transition:height 0.3s;"></div>
+                                <span style="font-size:8px;color:var(--text3);">${dayLabel}</span>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                    <p style="font-size:11px;color:var(--text3);">未来14天的预计复习量。绿色=轻松、蓝色=适中、橙色=较多。FSRS会自动安排最优复习时间。</p>
+                `;
+            } else if (el) {
+                el.innerHTML = '<p style="font-size:13px;color:var(--text3);">暂无复习预报数据，开始练习后将显示。</p>';
             }
         }
     } catch { /* degrade */ }
@@ -3671,12 +3815,24 @@ function renderPronunciationCard(data) {
         <div class="practice-actions">
             <button class="btn-practice-play" id="btnPlayWord">🔊 播放</button>
             <button class="btn-practice-record" id="btnRecordWord">🎤 跟读</button>
+            <button class="btn-practice-play" id="btnBookmarkWord" onclick="toggleWordBookmark('${data.word}')" style="opacity:0.6;">⭐ 收藏</button>
         </div>
         <div id="practiceResultArea"></div>
     </div>`;
 
     document.getElementById('btnPlayWord').addEventListener('click', () => playWordTTS(data.word));
     document.getElementById('btnRecordWord').addEventListener('click', startPracticeRecording);
+
+    // Check bookmark status
+    fetchWithAuth(`${API}/api/words/is-bookmarked?word=${encodeURIComponent(data.word)}`).then(r => {
+        if (r.ok) return r.json();
+    }).then(d => {
+        const btn = document.getElementById('btnBookmarkWord');
+        if (btn && d) {
+            btn.innerHTML = d.bookmarked ? '⭐ 已收藏' : '⭐ 收藏';
+            btn.style.opacity = d.bookmarked ? '1' : '0.6';
+        }
+    }).catch(() => {});
 }
 
 function renderDictationCard(data) {
@@ -4678,4 +4834,75 @@ function updateThemeIcon(isDark) {
             ? '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>'
             : '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
     }
+}
+
+// ============================================================
+// Data Export / Import
+// ============================================================
+async function exportMyData() {
+    try {
+        const r = await fetchWithAuth(`${API}/api/export`);
+        if (!r.ok) throw new Error('导出失败');
+        const data = await r.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `phonos-backup-${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        alert('导出失败: ' + e.message);
+    }
+}
+
+async function importMyData(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        if (!data.cards && !data.reviews) {
+            throw new Error('无效的备份文件');
+        }
+        if (!confirm(`确认导入 ${data.cards?.length || 0} 张卡片和 ${data.reviews?.length || 0} 条复习记录？这将覆盖现有数据。`)) return;
+        const r = await fetchWithAuth(`${API}/api/import`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        if (!r.ok) throw new Error('导入失败');
+        const result = await r.json();
+        alert(`导入成功！${result.imported_cards} 张卡片，${result.imported_reviews} 条复习记录`);
+    } catch (e) {
+        alert('导入失败: ' + e.message);
+    }
+    event.target.value = '';
+}
+
+async function toggleWordBookmark(word) {
+    try {
+        const checkR = await fetchWithAuth(`${API}/api/words/is-bookmarked?word=${encodeURIComponent(word)}`);
+        const isBookmarked = checkR.ok ? (await checkR.json()).bookmarked : false;
+        if (isBookmarked) {
+            await fetchWithAuth(`${API}/api/words/bookmark`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ word })
+            });
+        } else {
+            await fetchWithAuth(`${API}/api/words/bookmark`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ word })
+            });
+        }
+        const btn = document.getElementById('btnBookmarkWord');
+        if (btn) {
+            btn.innerHTML = isBookmarked ? '⭐ 收藏' : '⭐ 已收藏';
+            btn.style.opacity = isBookmarked ? '1' : '0.6';
+        }
+    } catch { /* degrade */ }
 }

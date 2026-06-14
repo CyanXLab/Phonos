@@ -18,6 +18,7 @@ import asyncio
 import time
 import warnings
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request, Depends
@@ -1693,27 +1694,31 @@ async def words_practice_evaluate(
                     pass
 
             # 记录发音尝试（不论对错，用于计算错误率）
+            # 使用 _clean_word 清理单词，确保与错误记录使用相同的 key
             try:
-                learning = get_learning_algorithm()
-                import sqlite3 as _sql3
-                now_ts = time.time()
-                conn_pr = _sql3.connect(learning.db_path)
-                attempt_row = conn_pr.execute(
-                    "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
-                    (user_id, word, 'pronunciation_attempt')
-                ).fetchone()
-                if attempt_row:
-                    conn_pr.execute(
-                        "UPDATE user_word_errors SET count = count + 1, last_seen = ? WHERE user_id = ? AND word = ? AND error_type = ?",
-                        (now_ts, user_id, word, 'pronunciation_attempt')
-                    )
-                else:
-                    conn_pr.execute(
-                        "INSERT INTO user_word_errors (user_id, word, error_type, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
-                        (user_id, word, 'pronunciation_attempt', now_ts, now_ts)
-                    )
-                conn_pr.commit()
-                conn_pr.close()
+                from learning_algorithm import _clean_word
+                cleaned_word = _clean_word(word)
+                if cleaned_word:  # 跳过功能词/缩写
+                    learning = get_learning_algorithm()
+                    import sqlite3 as _sql3
+                    now_ts = time.time()
+                    conn_pr = _sql3.connect(learning.db_path)
+                    attempt_row = conn_pr.execute(
+                        "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
+                        (user_id, cleaned_word, 'pronunciation_attempt')
+                    ).fetchone()
+                    if attempt_row:
+                        conn_pr.execute(
+                            "UPDATE user_word_errors SET count = count + 1, last_seen = ? WHERE user_id = ? AND word = ? AND error_type = ?",
+                            (now_ts, user_id, cleaned_word, 'pronunciation_attempt')
+                        )
+                    else:
+                        conn_pr.execute(
+                            "INSERT INTO user_word_errors (user_id, word, error_type, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
+                            (user_id, cleaned_word, 'pronunciation_attempt', now_ts, now_ts)
+                        )
+                    conn_pr.commit()
+                    conn_pr.close()
             except Exception:
                 pass
 
@@ -1824,27 +1829,31 @@ async def words_dictation_practice(data: dict, user: dict = Depends(get_current_
             pass
 
     # Record dictation attempt (both correct and incorrect) for accurate rate
+    # 使用 _clean_word 清理单词，确保与错误记录使用相同的 key
     try:
-        import sqlite3 as _sql3_conn
-        learning = get_learning_algorithm()
-        now = time.time()
-        conn2 = _sql3_conn.connect(learning.db_path)
-        attempt_row = conn2.execute(
-            "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
-            (user_id, word, 'dictation_attempt')
-        ).fetchone()
-        if attempt_row:
-            conn2.execute(
-                "UPDATE user_word_errors SET count = count + 1, last_seen = ? WHERE user_id = ? AND word = ? AND error_type = ?",
-                (now, user_id, word, 'dictation_attempt')
-            )
-        else:
-            conn2.execute(
-                "INSERT INTO user_word_errors (user_id, word, error_type, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
-                (user_id, word, 'dictation_attempt', now, now)
-            )
-        conn2.commit()
-        conn2.close()
+        from learning_algorithm import _clean_word
+        cleaned_w = _clean_word(word)
+        if cleaned_w:  # 跳过功能词/缩写
+            import sqlite3 as _sql3_conn
+            learning = get_learning_algorithm()
+            now = time.time()
+            conn2 = _sql3_conn.connect(learning.db_path)
+            attempt_row = conn2.execute(
+                "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
+                (user_id, cleaned_w, 'dictation_attempt')
+            ).fetchone()
+            if attempt_row:
+                conn2.execute(
+                    "UPDATE user_word_errors SET count = count + 1, last_seen = ? WHERE user_id = ? AND word = ? AND error_type = ?",
+                    (now, user_id, cleaned_w, 'dictation_attempt')
+                )
+            else:
+                conn2.execute(
+                    "INSERT INTO user_word_errors (user_id, word, error_type, count, first_seen, last_seen) VALUES (?, ?, ?, 1, ?, ?)",
+                    (user_id, cleaned_w, 'dictation_attempt', now, now)
+                )
+            conn2.commit()
+            conn2.close()
     except Exception:
         pass
 
@@ -2887,6 +2896,135 @@ async def get_achievements(user: dict = Depends(get_current_user)):
         return check_achievements(user_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取成就失败: {str(e)}")
+
+
+# ============================================================
+# 学习连续天数 / 每日目标 / 预报 / 收藏 / 导出 API
+# ============================================================
+
+@app.get("/api/streak")
+async def get_streak(user: dict = Depends(get_current_user)):
+    """获取学习连续天数"""
+    user_id = user.get("id", "default")
+    fsrs = get_fsrs_db()
+    return fsrs.get_streak(user_id)
+
+
+@app.get("/api/daily-goal")
+async def get_daily_goal(
+    date: Optional[str] = Query(None, description="日期 YYYY-MM-DD"),
+    user: dict = Depends(get_current_user),
+):
+    """获取每日目标进度"""
+    user_id = user.get("id", "default")
+    fsrs = get_fsrs_db()
+    return fsrs.get_daily_goal(user_id, date)
+
+
+@app.put("/api/daily-goal")
+async def update_daily_goal(data: dict, user: dict = Depends(get_current_user)):
+    """设置每日目标（target_reviews, target_new, target_minutes）"""
+    user_id = user.get("id", "default")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    target_reviews = data.get("target_reviews", 20)
+    target_new = data.get("target_new", 5)
+    target_minutes = data.get("target_minutes", 15)
+
+    import sqlite3 as _sql3_goal
+    fsrs = get_fsrs_db()
+    conn = _sql3_goal.connect(fsrs.db_path)
+
+    # Check if row exists
+    row = conn.execute(
+        "SELECT completed_reviews, completed_new, actual_minutes FROM daily_goals WHERE user_id=? AND date=?",
+        (user_id, today)
+    ).fetchone()
+
+    if row:
+        conn.execute(
+            "UPDATE daily_goals SET target_reviews=?, target_new=?, target_minutes=? WHERE user_id=? AND date=?",
+            (target_reviews, target_new, target_minutes, user_id, today)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO daily_goals (user_id, date, target_reviews, completed_reviews, target_new, completed_new, target_minutes, actual_minutes) "
+            "VALUES (?, ?, ?, 0, ?, 0, ?, 0)",
+            (user_id, today, target_reviews, target_new, target_minutes)
+        )
+
+    conn.commit()
+    conn.close()
+    return fsrs.get_daily_goal(user_id, today)
+
+
+@app.get("/api/forecast")
+async def get_forecast(
+    days: int = Query(30, description="预报天数"),
+    user: dict = Depends(get_current_user),
+):
+    """获取复习预报（未来N天每天的到期复习数量）"""
+    user_id = user.get("id", "default")
+    fsrs = get_fsrs_db()
+    return {"forecast": fsrs.get_forecast(user_id, days)}
+
+
+@app.post("/api/words/bookmark")
+async def bookmark_word(data: dict, user: dict = Depends(get_current_user)):
+    """收藏单词到生词本"""
+    user_id = user.get("id", "default")
+    word = data.get("word", "").lower().strip()
+    notes = data.get("notes", "")
+    if not word:
+        raise HTTPException(status_code=400, detail="缺少 word")
+    fsrs = get_fsrs_db()
+    return fsrs.bookmark_word(user_id, word, notes)
+
+
+@app.delete("/api/words/bookmark")
+async def unbookmark_word(data: dict, user: dict = Depends(get_current_user)):
+    """从生词本移除单词"""
+    user_id = user.get("id", "default")
+    word = data.get("word", "").lower().strip()
+    if not word:
+        raise HTTPException(status_code=400, detail="缺少 word")
+    fsrs = get_fsrs_db()
+    return fsrs.unbookmark_word(user_id, word)
+
+
+@app.get("/api/words/bookmarks")
+async def get_bookmarked_words(user: dict = Depends(get_current_user)):
+    """获取生词本列表"""
+    user_id = user.get("id", "default")
+    fsrs = get_fsrs_db()
+    return {"words": fsrs.get_bookmarked_words(user_id)}
+
+
+@app.get("/api/words/is-bookmarked")
+async def is_word_bookmarked(
+    word: str = Query(..., description="单词"),
+    user: dict = Depends(get_current_user),
+):
+    """检查单词是否已收藏"""
+    user_id = user.get("id", "default")
+    fsrs = get_fsrs_db()
+    return {"word": word, "bookmarked": fsrs.is_word_bookmarked(user_id, word.lower().strip())}
+
+
+@app.get("/api/export")
+async def export_user_data(user: dict = Depends(get_current_user)):
+    """导出用户所有学习数据"""
+    user_id = user.get("id", "default")
+    fsrs = get_fsrs_db()
+    return fsrs.export_user_data(user_id)
+
+
+@app.post("/api/import")
+async def import_user_data(data: dict, user: dict = Depends(get_current_user)):
+    """导入用户学习数据"""
+    user_id = user.get("id", "default")
+    fsrs = get_fsrs_db()
+    return fsrs.import_user_data(user_id, data)
 
 
 @app.get("/api/learning/insights")
