@@ -8,4 +8,6 @@ tool-results/
 download/
 backend_extracted/
 agent-ctx/
+upload/
 .env
+worklog.md

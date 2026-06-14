@@ -601,8 +601,17 @@ function updateSentenceVisibility() {
     } else {
         // Practice mode: show the full sentence
         if (S.sentence) {
-            el.sentenceEn.textContent = S.sentence.text;
-            el.sentenceZh.textContent = S.sentence.translation || '';
+            // Apply translation priority setting
+            const settings = S.settings || {};
+            if (settings.show_translation_first && S.sentence.translation) {
+                el.sentenceZh.textContent = S.sentence.translation;
+                el.sentenceZh.style.order = '-1';  // Move translation above English
+                el.sentenceEn.textContent = S.sentence.text;
+            } else {
+                el.sentenceEn.textContent = S.sentence.text;
+                el.sentenceZh.textContent = S.sentence.translation || '';
+                el.sentenceZh.style.order = '';
+            }
         }
         el.sentenceEn.classList.remove('dictation-hidden');
         el.sentenceZh.classList.remove('dictation-hidden');
@@ -910,10 +919,18 @@ function renderWords(words) {
 function speakTTS(speed) {
     if (!S.sentence) return;
     const useSpeed = speed || S.ttsSpeed;
-    if (S.ttsMode === 'browser') {
-        speakBrowserTTS(useSpeed);
+    // Apply TTS priority setting
+    const settings = S.settings || {};
+    if (settings.tts_priority === 'server') {
+        // Try server first, fallback to browser
+        speakServerTTS(useSpeed).catch(() => speakBrowserTTS(useSpeed));
     } else {
-        speakServerTTS(useSpeed);
+        // Default: browser first, then server
+        if (S.ttsMode === 'browser') {
+            speakBrowserTTS(useSpeed);
+        } else {
+            speakServerTTS(useSpeed);
+        }
     }
 }
 
@@ -3619,9 +3636,11 @@ function renderErrorStats(data) {
     } else {
         html += '<ul class="error-stats-list">';
         pronErrors.slice(0, 15).forEach(ew => {
+            const rateInfo = ew.pronunciation_rate !== undefined ? `<span style="color:#e74c3c;font-weight:600;margin-left:6px;">${ew.pronunciation_rate}%</span>` : '';
+            const totalInfo = ew.pronunciation_total ? `/${ew.pronunciation_total}` : '';
             html += `<li class="error-stats-item">
                 <span class="error-stats-word">${ew.word} <span style="color:var(--text3);font-size:11px;">/${ew.ipa}/</span></span>
-                <span class="error-stats-count" style="color:#e74c3c">${ew.pronunciation_errors}次</span>
+                <span class="error-stats-count" style="color:#e74c3c">${ew.pronunciation_errors}次${totalInfo} ${rateInfo}</span>
             </li>`;
         });
         html += '</ul>';
@@ -3636,9 +3655,11 @@ function renderErrorStats(data) {
     } else {
         html += '<ul class="error-stats-list">';
         dictErrors.slice(0, 15).forEach(ew => {
+            const rateInfo = ew.dictation_rate !== undefined ? `<span style="color:#e67e22;font-weight:600;margin-left:6px;">${ew.dictation_rate}%</span>` : '';
+            const totalInfo = ew.dictation_total ? `/${ew.dictation_total}` : '';
             html += `<li class="error-stats-item">
                 <span class="error-stats-word">${ew.word} <span style="color:var(--text3);font-size:11px;">/${ew.ipa}/</span></span>
-                <span class="error-stats-count" style="color:#e67e22">${ew.dictation_errors}次</span>
+                <span class="error-stats-count" style="color:#e67e22">${ew.dictation_errors}次${totalInfo} ${rateInfo}</span>
             </li>`;
         });
         html += '</ul>';
@@ -3887,6 +3908,10 @@ function openSettingsModal() {
     const fsrs = s.fsrs || {};
     const learning = s.learning || {};
     const display = s.display || {};
+    const scoring = s.scoring_weights || { pronunciation: 0.55, completeness: 0.25, fluency: 0.20 };
+    const ttsPriority = s.tts_priority || 'browser';
+    const showTranslationFirst = s.show_translation_first || false;
+    const fitInterval = s.fsrs_fit_interval || 30;
 
     el.settingsModalBody.innerHTML = `
         <!-- FSRS Settings -->
@@ -3925,8 +3950,46 @@ function openSettingsModal() {
                     <input type="text" class="settings-input settings-input-wide" id="setRelearningSteps" value="${(fsrs.relearning_steps || ['10']).join(',')}">
                 </div>
             </div>
+            <div class="settings-row">
+                <span class="settings-row-label">拟合间隔(次)</span>
+                <div class="settings-row-value">
+                    <input type="number" class="settings-input" id="setFitInterval" min="10" max="200" value="${fitInterval}">
+                    <span style="font-size:11px;color:var(--text3);margin-left:4px;">每N次复习拟合一次</span>
+                </div>
+            </div>
             <div style="text-align:right;margin-top:8px;">
                 <button class="settings-btn-fit" id="btnFsrsFit">优化参数</button>
+            </div>
+        </div>
+
+        <!-- Scoring Weights -->
+        <div class="settings-group">
+            <div class="settings-group-title">
+                📊 评分权重
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">发音准确度</span>
+                <div class="settings-row-value">
+                    <input type="range" class="settings-slider" id="setWeightPron" min="0" max="1" step="0.05" value="${scoring.pronunciation}">
+                    <span class="settings-slider-val" id="setWeightPronVal">${Math.round(scoring.pronunciation * 100)}%</span>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">完整度</span>
+                <div class="settings-row-value">
+                    <input type="range" class="settings-slider" id="setWeightComp" min="0" max="1" step="0.05" value="${scoring.completeness}">
+                    <span class="settings-slider-val" id="setWeightCompVal">${Math.round(scoring.completeness * 100)}%</span>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">流利度</span>
+                <div class="settings-row-value">
+                    <input type="range" class="settings-slider" id="setWeightFlu" min="0" max="1" step="0.05" value="${scoring.fluency}">
+                    <span class="settings-slider-val" id="setWeightFluVal">${Math.round(scoring.fluency * 100)}%</span>
+                </div>
+            </div>
+            <div class="settings-row-hint" id="weightHint">
+                权重自动归一化，当前: 发音${Math.round(scoring.pronunciation / (scoring.pronunciation + scoring.completeness + scoring.fluency) * 100)}% / 完整${Math.round(scoring.completeness / (scoring.pronunciation + scoring.completeness + scoring.fluency) * 100)}% / 流利${Math.round(scoring.fluency / (scoring.pronunciation + scoring.completeness + scoring.fluency) * 100)}%
             </div>
         </div>
 
@@ -3983,6 +4046,21 @@ function openSettingsModal() {
                     </select>
                 </div>
             </div>
+            <div class="settings-row">
+                <span class="settings-row-label">优先显示翻译</span>
+                <button class="settings-toggle ${showTranslationFirst ? 'active' : ''}" id="setTranslationFirst">
+                    <div class="settings-toggle-knob"></div>
+                </button>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">TTS引擎</span>
+                <div class="settings-row-value">
+                    <select class="settings-select" id="setTTSPriority">
+                        <option value="browser" ${ttsPriority === 'browser' ? 'selected' : ''}>浏览器优先</option>
+                        <option value="server" ${ttsPriority === 'server' ? 'selected' : ''}>服务端优先</option>
+                    </select>
+                </div>
+            </div>
         </div>
 
         <!-- Action Buttons -->
@@ -4004,6 +4082,27 @@ function openSettingsModal() {
     if (sliderExplore && sliderExploreVal) {
         sliderExplore.addEventListener('input', () => { sliderExploreVal.textContent = sliderExplore.value; });
     }
+
+    // Scoring weight sliders - update hint text dynamically
+    const wPron = document.getElementById('setWeightPron');
+    const wComp = document.getElementById('setWeightComp');
+    const wFlu = document.getElementById('setWeightFlu');
+    const wPronVal = document.getElementById('setWeightPronVal');
+    const wCompVal = document.getElementById('setWeightCompVal');
+    const wFluVal = document.getElementById('setWeightFluVal');
+    const weightHint = document.getElementById('weightHint');
+    function updateWeightHint() {
+        if (!wPron || !wComp || !wFlu) return;
+        const p = parseFloat(wPron.value), c = parseFloat(wComp.value), f = parseFloat(wFlu.value);
+        const t = p + c + f || 1;
+        wPronVal.textContent = Math.round(p * 100) + '%';
+        wCompVal.textContent = Math.round(c * 100) + '%';
+        wFluVal.textContent = Math.round(f * 100) + '%';
+        if (weightHint) {
+            weightHint.textContent = `权重自动归一化，当前: 发音${Math.round(p/t*100)}% / 完整${Math.round(c/t*100)}% / 流利${Math.round(f/t*100)}%`;
+        }
+    }
+    [wPron, wComp, wFlu].forEach(s => { if (s) s.addEventListener('input', updateWeightHint); });
 
     // Toggle buttons
     document.querySelectorAll('.settings-toggle').forEach(toggle => {
@@ -4050,6 +4149,12 @@ function openSettingsModal() {
                 learning_steps: (document.getElementById('setLearningSteps')?.value || '1,10').split(',').map(s => s.trim()),
                 relearning_steps: (document.getElementById('setRelearningSteps')?.value || '10').split(',').map(s => s.trim()),
             },
+            scoring_weights: {
+                pronunciation: parseFloat(document.getElementById('setWeightPron')?.value || 0.55),
+                completeness: parseFloat(document.getElementById('setWeightComp')?.value || 0.25),
+                fluency: parseFloat(document.getElementById('setWeightFlu')?.value || 0.20),
+            },
+            fsrs_fit_interval: parseInt(document.getElementById('setFitInterval')?.value || 30),
             learning: {
                 exploration_rate: parseFloat(document.getElementById('setExplorationRate')?.value || 0.3),
                 calibration_enabled: document.getElementById('setCalibration')?.classList.contains('active') || false,
@@ -4060,6 +4165,8 @@ function openSettingsModal() {
                 auto_play_tts: document.getElementById('setAutoTTS')?.classList.contains('active') || false,
                 dictation_speed: parseFloat(document.getElementById('setDictationSpeed')?.value || 1.0),
             },
+            show_translation_first: document.getElementById('setTranslationFirst')?.classList.contains('active') || false,
+            tts_priority: document.getElementById('setTTSPriority')?.value || 'browser',
         };
 
         try {

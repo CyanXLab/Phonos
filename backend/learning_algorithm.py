@@ -883,6 +883,24 @@ class LearningAlgorithm:
 
         return result
 
+    def get_word_progress(self, word: str, user_id: str) -> dict:
+        """获取某个单词的练习进度（attempts, best_score, avg_score等）"""
+        conn = _get_conn(self.db_path)
+        row = conn.execute(
+            "SELECT word, attempts, best_score, avg_score, mastered FROM user_word_progress WHERE user_id = ? AND word = ?",
+            (user_id, word)
+        ).fetchone()
+        conn.close()
+        if row:
+            return {
+                "word": row[0],
+                "attempts": row[1],
+                "best_score": row[2],
+                "avg_score": row[3],
+                "mastered": bool(row[4]),
+            }
+        return None
+
 
 # 全局实例
 _learning_algo: Optional[LearningAlgorithm] = None

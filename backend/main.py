@@ -1351,6 +1351,10 @@ async def words_error_stats(user: dict = Depends(get_current_user)):
         card_info = fsrs.get_card_info(card_id, user_id)
         word_detail = dict_svc.lookup(word, local_only=True)
 
+        # 获取总尝试次数（从 user_word_progress）
+        word_progress = learning.get_word_progress(word, user_id)
+        total_attempts = word_progress.get("attempts", 0) if word_progress else 0
+
         entry = {
             "word": word,
             "ipa": word_detail.get("ipa", ""),
@@ -1362,12 +1366,18 @@ async def words_error_stats(user: dict = Depends(get_current_user)):
         }
 
         if ew.get("pronunciation_errors", 0) > 0:
-            entry["pronunciation_errors"] = ew["pronunciation_errors"]
-            pron_errors.append(entry)
+            pron_err_count = ew["pronunciation_errors"]
+            entry["pronunciation_errors"] = pron_err_count
+            entry["pronunciation_total"] = total_attempts
+            entry["pronunciation_rate"] = round(pron_err_count / total_attempts * 100, 1) if total_attempts > 0 else 100.0
+            pron_errors.append(entry.copy())
 
         if ew.get("dictation_errors", 0) > 0:
-            entry["dictation_errors"] = ew["dictation_errors"]
-            dict_errors.append(entry)
+            dict_err_count = ew["dictation_errors"]
+            entry["dictation_errors"] = dict_err_count
+            entry["dictation_total"] = total_attempts
+            entry["dictation_rate"] = round(dict_err_count / total_attempts * 100, 1) if total_attempts > 0 else 100.0
+            dict_errors.append(entry.copy())
 
     # Sort by error count descending
     pron_errors.sort(key=lambda x: x.get("pronunciation_errors", 0), reverse=True)
@@ -2189,6 +2199,21 @@ async def evaluate_audio(
                 total_duration=total_duration,
             )
 
+            # 应用用户自定义评分权重
+            user_settings = user.get("settings", {})
+            custom_weights = user_settings.get("scoring_weights", None)
+            if custom_weights:
+                pw = float(custom_weights.get("pronunciation", 0.55))
+                cw = float(custom_weights.get("completeness", 0.25))
+                fw = float(custom_weights.get("fluency", 0.20))
+                total_w = pw + cw + fw
+                if total_w > 0:
+                    pw, cw, fw = pw/total_w, cw/total_w, fw/total_w
+                eval_result.overall_score = round(min(100.0, max(0.0,
+                    eval_result.pronunciation_score * pw +
+                    eval_result.completeness_score * cw +
+                    eval_result.fluency_score * fw)), 1)
+
             tips = generate_error_tips(eval_result.errors)
             response = result_to_dict(eval_result, tips)
             response["sentence"] = sentence_text
@@ -2645,6 +2670,12 @@ async def get_settings(user: dict = Depends(get_current_user)):
             # 扩展设置（来自用户 profile settings）
             "exploration_rate": user_settings.get("exploration_rate", 0.3),
             "enable_prediction_calibration": user_settings.get("enable_prediction_calibration", True),
+            "scoring_weights": user_settings.get("scoring_weights", {"pronunciation": 0.55, "completeness": 0.25, "fluency": 0.20}),
+            "translation_priority": user_settings.get("translation_priority", "after"),
+            "tts_priority": user_settings.get("tts_priority", "browser"),
+            "show_translation_first": user_settings.get("show_translation_first", False),
+            "prefer_server_tts": user_settings.get("prefer_server_tts", False),
+            "fsrs_fit_interval": user_settings.get("fsrs_fit_interval", 30),
         }
         return result
     except Exception as e:
@@ -2678,7 +2709,11 @@ async def update_settings(data: dict, user: dict = Depends(get_current_user)):
 
         # 扩展设置（存入用户 profile settings）
         current_settings = dict(user.get("settings", {}))
-        extended_keys = ["exploration_rate", "enable_prediction_calibration"]
+        extended_keys = [
+            "exploration_rate", "enable_prediction_calibration",
+            "scoring_weights", "translation_priority", "tts_priority",
+            "fsrs_fit_interval", "show_translation_first", "prefer_server_tts",
+        ]
         updated = False
         for key in extended_keys:
             if key in data:

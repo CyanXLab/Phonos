@@ -1151,7 +1151,7 @@ class FSRSDatabase:
         }
 
     def _check_auto_fit(self, user_id: str = "default"):
-        """检查是否需要自动拟合参数（每30次复习触发一次）
+        """检查是否需要自动拟合参数（默认每30次复习触发一次，可通过设置调整）
         
         在后台静默执行，不影响主流程。
         """
@@ -1162,8 +1162,19 @@ class FSRSDatabase:
             ).fetchone()[0]
             conn.close()
 
-            # 每30次复习触发一次拟合
-            if total_reviews > 0 and total_reviews % 30 == 0:
+            # 获取用户的拟合间隔设置（默认30次）
+            fit_interval = 30
+            try:
+                from auth_service import get_auth_service
+                auth = get_auth_service()
+                profile = auth.get_profile(user_id)
+                if profile and profile.get("settings"):
+                    fit_interval = profile["settings"].get("fsrs_fit_interval", 30)
+            except Exception:
+                pass
+
+            # 每fit_interval次复习触发一次拟合
+            if total_reviews > 0 and total_reviews % fit_interval == 0:
                 user_params = self.get_user_params(user_id)
                 # 只在拟合次数合理的情况下执行（避免过于频繁）
                 # 如果上次拟合时间距今不到1小时，跳过
