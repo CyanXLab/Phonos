@@ -82,6 +82,7 @@ const S = {
     abPhase: null,               // 'A' | 'B' | null - A/B compare playback phase
     bookmarked: false,           // Whether current sentence is bookmarked
     _lastReviewedCardId: null,   // Track last reviewed card to avoid repetition
+    _reviewedCardIds: [],         // All reviewed card IDs in current session (avoid LEARNING/RELEARNING re-appearance)
     // --- Settings state ---
     settings: null,              // Cached settings from /api/settings
 };
@@ -503,8 +504,8 @@ async function loadSentence(forceNew = false) {
                 } else {
                     // Smart mode (FSRS-based)
                     let smartUrl = `${API}/api/mode/smart/next`;
-                    if (S._lastReviewedCardId) {
-                        smartUrl += `?exclude=${encodeURIComponent(S._lastReviewedCardId)}`;
+                    if (S._reviewedCardIds.length > 0) {
+                        smartUrl += `?exclude=${encodeURIComponent(S._reviewedCardIds.join(','))}`;
                     }
                     const r = await fetchWithAuth(smartUrl, {signal: AbortSignal.timeout(8000)});
                     if (r.ok) {
@@ -523,8 +524,8 @@ async function loadSentence(forceNew = false) {
         if (!loaded && !forceNew) {
             try {
                 let fsrsUrl = `${API}/api/fsrs/next`;
-                if (S._lastReviewedCardId) {
-                    fsrsUrl += `?exclude=${encodeURIComponent(S._lastReviewedCardId)}`;
+                if (S._reviewedCardIds.length > 0) {
+                    fsrsUrl += `?exclude=${encodeURIComponent(S._reviewedCardIds.join(','))}`;
                 }
                 const r = await fetchWithAuth(fsrsUrl, {signal: AbortSignal.timeout(8000)});
                 if (r.ok) {
@@ -567,7 +568,8 @@ async function loadSentence(forceNew = false) {
         S._dictationErrorWords = null;
         S.fsrsRated = false;
         S.predictionScore = null;
-        S._lastReviewedCardId = null; // Clear after successful load
+        // 如果成功加载了不同的句子，清除上一次的exclude（但保留session内已复习列表）
+        // _reviewedCardIds 在整个session内保留，防止LEARNING/RELEARNING卡片1分钟后又出现
 
         renderSentence();
         renderDictationInputs();
@@ -1241,6 +1243,12 @@ async function submitFSRSRating(rating) {
         if (r.ok) {
             S.fsrsRated = true;
             S._lastReviewedCardId = cardId; // Track to avoid repeating
+            // Add to session reviewed list (prevent LEARNING/RELEARNING cards re-appearing)
+            if (!S._reviewedCardIds.includes(cardId)) {
+                S._reviewedCardIds.push(cardId);
+                // Keep only last 50 to avoid URL too long
+                if (S._reviewedCardIds.length > 50) S._reviewedCardIds.shift();
+            }
             document.querySelectorAll('.fsrs-btn').forEach(btn => {
                 btn.classList.remove('selected');
                 if (parseInt(btn.dataset.rating) === rating) {
@@ -1912,11 +1920,11 @@ function updateBookmarkUI() {
 // Results
 // ============================================================
 function calibrateScore(raw) {
-    // CTC forced-alignment scores typically land in 30-60% range even for correct pronunciation.
-    // Raising to 0.25 power remaps typical correct range (~30-60%) to ~74-88%.
+    // 后端scoring.py已经通过sigmoid映射将分数归一化到0-100范围
+    // 不再需要二次校准，直接返回原始值
     if (raw < 0) return 0;
     if (raw > 100) return 100;
-    return Math.min(100, Math.pow(raw, 0.25));
+    return raw;
 }
 
 function renderResults(d) {
