@@ -1273,12 +1273,19 @@ class FSRSDatabase:
     def get_next_word_for_practice(self, user_id: str = "default", new_ratio: float = 0.7, exclude_card_ids: List[str] = None) -> Optional[dict]:
         """获取下一个练习单词（FSRS驱动，新词优先，穿插到期复习）
         
-        策略（区别于 get_next_word_for_review）：
+        策略（参考 Anki 和 FSRS 官方推荐的新旧卡片混合方式）：
         - 新词占约 70%，到期复习占约 30%
-        - 随机混合，避免全是新词或全是复习
+        - 新词权重远高于复习，确保以学习新内容为主
+        - LEARNING/RELEARNING 状态的卡片不立即推送（避免同一卡片连续出现）
+          只有真正到期（due <= now）的复习卡片才会推送
         - 已掌握的（REVIEW + 未到期 + 间隔>=3天）不推荐
-        - 错误次数多的词优先级提升
         - exclude_card_ids: 排除刚复习过的卡片（避免短间隔后立即重复）
+        
+        关键改进（参考 Anki 调度逻辑）：
+        1. 新词权重 7.0，到期复习权重 3.0 —— 新词为主，复习为辅
+        2. LEARNING/RELEARNING 不参与选择（它们在 learning_steps/relearning_steps 中
+           有极短的调度间隔如1分钟/10分钟，不适合在练习会话中连续推送）
+        3. 只有真正到期（due <= now）的 REVIEW 卡片才作为复习候选
         """
         now = time.time()
         conn = self._get_conn()
@@ -1286,10 +1293,11 @@ class FSRSDatabase:
         # 获取所有未掌握的卡片
         query = ("SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
                  "FROM cards WHERE card_type='word' AND user_id=? "
-                 "AND NOT (state=2 AND due > ? AND scheduled_days >= 3) ")
+                 "AND NOT (state=2 AND due > ? AND scheduled_days >= 3) "
+                 "AND state NOT IN (1, 3) ")  # 排除 LEARNING/RELEARNING，避免短间隔重复
         params = [user_id, now]
         
-        # Exclude recently reviewed cards (prevent immediate re-appearance of LEARNING/RELEARNING)
+        # Exclude recently reviewed cards (prevent immediate re-appearance)
         if exclude_card_ids:
             placeholders = ','.join(['?'] * len(exclude_card_ids))
             query += f"AND card_id NOT IN ({placeholders}) "
@@ -1308,26 +1316,24 @@ class FSRSDatabase:
 
         # 分类
         new_cards = [r for r in rows if r[1] == 0]
-        due_review_cards = [r for r in rows if r[1] != 0 and r[2] <= now and r[2] > 0]
-        learning_cards = [r for r in rows if r[1] in (1, 3)]
-        unmastered_review_cards = [r for r in rows if r[1] == 2 and not (r[2] > now and r[3] >= 3)]
+        due_review_cards = [r for r in rows if r[1] == 2 and r[2] <= now and r[2] > 0]
+        # 未到期但未掌握的 REVIEW 卡片（scheduled_days < 3）
+        unmastered_future_cards = [r for r in rows if r[1] == 2 and r[2] > now and r[3] < 3]
 
-        # 优先级：到期复习 > 学习中 > 未掌握复习 > 新词
+        # 优先级：新词 > 到期复习 > 未掌握但未到期
+        # 新词权重最高，确保以新内容为主
         candidates = []
         weights = []
 
-        for r in due_review_cards:
-            candidates.append(r)
-            weights.append(3.0)  # 到期复习权重最高
-        for r in learning_cards:
-            candidates.append(r)
-            weights.append(2.5)  # 学习中权重次之
-        for r in unmastered_review_cards:
-            candidates.append(r)
-            weights.append(2.0)  # 未掌握复习权重再次之
         for r in new_cards:
             candidates.append(r)
-            weights.append(1.0)  # 新词权重基础
+            weights.append(7.0)  # 新词权重最高（70%）
+        for r in due_review_cards:
+            candidates.append(r)
+            weights.append(3.0)  # 到期复习权重次之（30%）
+        for r in unmastered_future_cards:
+            candidates.append(r)
+            weights.append(1.0)  # 未到期未掌握偶尔推送
 
         if not candidates:
             return None

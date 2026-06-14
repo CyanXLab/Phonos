@@ -2739,6 +2739,15 @@ function renderHeatmap(container, heatmapData) {
         }
     });
     
+    // Determine the day of week for the first date (0=Sun, 1=Mon, ..., 6=Sat)
+    // We need to pad empty cells at the beginning so the first date aligns to its weekday
+    // Monday = row 0, Tuesday = row 1, ..., Sunday = row 6
+    const firstDayOfWeek = dates.length > 0 ? dates[0].day : 0;
+    // Convert from JS Sunday=0 to Monday=0 based row index
+    // JS: Sun=0, Mon=1, Tue=2, ..., Sat=6
+    // Grid: Mon=0, Tue=1, ..., Sat=5, Sun=6
+    const firstRowOffset = firstDayOfWeek === 0 ? 6 : firstDayOfWeek - 1;
+    
     // Render
     let html = `
     <div class="heatmap-summary">
@@ -2750,9 +2759,14 @@ function renderHeatmap(container, heatmapData) {
         <div class="heatmap-months">${monthLabels.map(m => `<span style="grid-column:${m.week + 1}">${m.label}</span>`).join('')}</div>
         <div class="heatmap-grid">
             <div class="heatmap-weekdays">
-                <span>一</span><span></span><span>三</span><span></span><span>五</span><span></span>
+                <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
             </div>
-            <div class="heatmap-cells">`;
+            <div class="heatmap-cells" style="grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:2px;">`;
+    
+    // Add empty cells for offset (to align first date to correct weekday)
+    for (let i = 0; i < firstRowOffset; i++) {
+        html += `<span class="heatmap-cell" style="visibility:hidden;"></span>`;
+    }
     
     dates.forEach(d => {
         const level = d.count === 0 ? 0 : d.count <= 1 ? 1 : d.count <= 3 ? 2 : d.count <= 5 ? 3 : 4;
@@ -2786,10 +2800,20 @@ async function loadEnhancedStatsSections(stats) {
                 cpEl.querySelector('.stats-cognitive-icon').textContent = profile.archetype_icon || '🧠';
                 cpEl.querySelector('.stats-cognitive-name').textContent = profile.archetype_name || '学习者';
                 const metrics = profile.metrics || {};
+                // 使用描述性标签，并显示有意义的数值
+                const speedPct = Math.round((metrics.speed || 0) * 100);
+                const retPct = Math.round((metrics.retention || 0) * 100);
+                const covPct = Math.round((metrics.coverage || 0) * 100);
+                const confGap = Math.round((metrics.confidence_accuracy_gap || 0) * 100);
+                const againRate = Math.round((metrics.again_rate || 0) * 100);
+                const easyRate = Math.round((metrics.easy_rate || 0) * 100);
                 cmEl.innerHTML = `
-                    <div class="stats-cognitive-metric"><span class="val">${Math.round((metrics.speed || 0) * 100)}%</span>速度</div>
-                    <div class="stats-cognitive-metric"><span class="val">${Math.round((metrics.retention || 0) * 100)}%</span>保持</div>
-                    <div class="stats-cognitive-metric"><span class="val">${Math.round((metrics.coverage || 0) * 100)}%</span>覆盖</div>
+                    <div class="stats-cognitive-metric"><span class="val">${speedPct}%</span>学习速度</div>
+                    <div class="stats-cognitive-metric"><span class="val">${retPct}%</span>记忆保持</div>
+                    <div class="stats-cognitive-metric"><span class="val">${covPct}%</span>知识覆盖</div>
+                    <div class="stats-cognitive-metric"><span class="val" style="color:${Math.abs(confGap) <= 10 ? 'var(--ok)' : 'var(--warn)'};">${confGap > 0 ? '+' : ''}${confGap}%</span>自信偏差</div>
+                    <div class="stats-cognitive-metric"><span class="val">${againRate}%</span>遗忘率</div>
+                    <div class="stats-cognitive-metric"><span class="val">${easyRate}%</span>轻松率</div>
                 `;
             }
         }
@@ -4039,21 +4063,23 @@ async function openCognitiveMirror() {
         speed: { label: '学习速度', color: 'var(--pri)' },
         retention: { label: '记忆保持', color: 'var(--ok)' },
         coverage: { label: '知识覆盖', color: 'var(--accent-blue)' },
-        confidence_gap: { label: '自信偏差', color: 'var(--warn)' },
-        again_rate: { label: '重复率', color: 'var(--fsrs-again)' },
+        confidence_accuracy_gap: { label: '自信偏差', color: 'var(--warn)' },
+        again_rate: { label: '遗忘率', color: 'var(--fsrs-again)' },
         easy_rate: { label: '轻松率', color: 'var(--fsrs-easy)' },
     };
 
     let metricsHTML = '';
     for (const [key, info] of Object.entries(metricNames)) {
-        const val = metrics[key] !== undefined ? Math.round(metrics[key] * 100) : 0;
+        const rawVal = metrics[key] !== undefined ? metrics[key] : 0;
+        const val = Math.round(Math.abs(rawVal) * 100);
+        const sign = key === 'confidence_accuracy_gap' && rawVal > 0 ? '+' : '';
         metricsHTML += `
         <div class="metric-bar-item">
             <span class="metric-bar-label">${info.label}</span>
             <div class="metric-bar-track">
-                <div class="metric-bar-fill" style="width:${val}%;background:${info.color};"></div>
+                <div class="metric-bar-fill" style="width:${Math.min(val, 100)}%;background:${info.color};"></div>
             </div>
-            <span class="metric-bar-val" style="color:${info.color};">${val}%</span>
+            <span class="metric-bar-val" style="color:${info.color};">${sign}${val}%</span>
         </div>`;
     }
 

@@ -12,10 +12,79 @@ Phonos 智能学习算法
 import sqlite3
 import time
 import json
+import re
 from pathlib import Path
 from typing import Optional, Dict, List
 
 DB_PATH = Path(__file__).parent / "phonos_learning.db"
+
+# ============================================================
+# 单词过滤规则（用于'需要加强的单词'等功能）
+# ============================================================
+# 常见功能词（不需要记录为'需要加强'）
+STOP_WORDS = {
+    'i', 'me', 'my', 'mine', 'myself',
+    'you', 'your', 'yours', 'yourself', 'yourselves',
+    'he', 'him', 'his', 'himself',
+    'she', 'her', 'hers', 'herself',
+    'it', 'its', 'itself',
+    'we', 'us', 'our', 'ours', 'ourselves',
+    'they', 'them', 'their', 'theirs', 'themselves',
+    'the', 'a', 'an',
+    'and', 'or', 'but', 'nor', 'so', 'yet',
+    'is', 'am', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'having',
+    'do', 'does', 'did', 'doing',
+    'will', 'would', 'shall', 'should',
+    'can', 'could', 'may', 'might', 'must',
+    'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+    'from', 'up', 'about', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'between',
+    'out', 'off', 'over', 'under', 'again',
+    'not', 'no', 'nor',
+    'this', 'that', 'these', 'those',
+    'here', 'there', 'when', 'where', 'why', 'how',
+    'what', 'which', 'who', 'whom',
+    'if', 'then', 'than', 'too', 'very', 'just',
+    'well', 'oh', 'ah', 'uh', 'um', 'hey', 'hi', 'hello',
+    'yes', 'yeah', 'nope', 'okay', 'ok',
+    'sir', 'madam', 'mr', 'mrs', 'ms',
+}
+
+
+def _clean_word(word: str) -> Optional[str]:
+    """清理单词：去除标点、忽略缩写、过滤常见功能词
+    
+    规则：
+    1. 去除前后标点符号（保留内部连字符，如 well-known）
+    2. 忽略缩写/缩略形式（含撇号的词，如 i'm, don't, it's）
+    3. 过滤常见功能词（代词、冠词、介词、连词、助动词等）
+    4. 跳过单字母和过短的词（<=1个字母）
+    5. 跳过纯数字
+    
+    Returns:
+        清理后的单词，如果应该跳过则返回 None
+    """
+    # 去除前后标点
+    cleaned = word.strip(".,!?;:'\"()-—–…").rstrip("'").strip()
+    
+    # 忽略缩写/缩略形式（含撇号）
+    if "'" in cleaned:
+        return None
+    
+    # 跳过空或单字母
+    if not cleaned or len(cleaned) <= 1:
+        return None
+    
+    # 跳过纯数字
+    if cleaned.isdigit():
+        return None
+    
+    # 过滤常见功能词
+    if cleaned.lower() in STOP_WORDS:
+        return None
+    
+    return cleaned.lower()
 
 
 def _get_conn(db_path: str = None):
@@ -143,10 +212,11 @@ class LearningAlgorithm:
 
         # 2. Update user_word_progress
         for ws in word_scores:
-            word = ws.get("word", "").lower()
-            accuracy = ws.get("accuracy", 0)
+            raw_word = ws.get("word", "")
+            word = _clean_word(raw_word)
             if not word:
                 continue
+            accuracy = ws.get("accuracy", 0)
             row = conn.execute(
                 "SELECT attempts, best_score, avg_score FROM user_word_progress WHERE user_id = ? AND word = ?",
                 (user_id, word)
@@ -171,9 +241,12 @@ class LearningAlgorithm:
 
         # 2.5 Record pronunciation errors for weak words
         for ws in word_scores:
-            word = ws.get("word", "").lower()
+            raw_word = ws.get("word", "")
+            word = _clean_word(raw_word)
+            if not word:
+                continue
             accuracy = ws.get("accuracy", 0)
-            if word and accuracy < 60:
+            if accuracy < 60:
                 # This word was mispronounced
                 err_row = conn.execute(
                     "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
@@ -246,10 +319,11 @@ class LearningAlgorithm:
         # 3d. Also record pronunciation attempts for words (total, not just errors)
         #     This is crucial for accurate error rate calculation at word level
         for ws in word_scores:
-            word = ws.get("word", "").lower()
-            accuracy = ws.get("accuracy", 0)
+            raw_word = ws.get("word", "")
+            word = _clean_word(raw_word)
             if not word:
                 continue
+            accuracy = ws.get("accuracy", 0)
             # Record pronunciation attempt (whether correct or not)
             pron_attempt_row = conn.execute(
                 "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
@@ -652,9 +726,10 @@ class LearningAlgorithm:
         now = time.time()
         conn = _get_conn(self.db_path)
         for word in error_words:
-            word = word.lower().strip()
-            if not word:
+            cleaned = _clean_word(word)
+            if not cleaned:
                 continue
+            word = cleaned
             row = conn.execute(
                 "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
                 (user_id, word, 'dictation')
@@ -678,11 +753,13 @@ class LearningAlgorithm:
         conn = _get_conn(self.db_path)
         for word_info in error_words:
             if isinstance(word_info, dict):
-                word = word_info.get("word", "").lower().strip()
+                raw_word = word_info.get("word", "")
             else:
-                word = str(word_info).lower().strip()
-            if not word:
+                raw_word = str(word_info)
+            cleaned = _clean_word(raw_word)
+            if not cleaned:
                 continue
+            word = cleaned
             row = conn.execute(
                 "SELECT count FROM user_word_errors WHERE user_id = ? AND word = ? AND error_type = ?",
                 (user_id, word, 'pronunciation')
@@ -915,6 +992,12 @@ class LearningAlgorithm:
             # Skip internal tracking types
             if etype.endswith('_attempt'):
                 continue
+            # 过滤功能词、缩写、标点等（兼容已有数据）
+            cleaned = _clean_word(word)
+            if not cleaned:
+                continue
+            # 使用清理后的词（去标点）
+            word = cleaned
             if word not in seen_words:
                 seen_words.add(word)
                 result.append({

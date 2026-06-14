@@ -923,9 +923,13 @@ async def mode_sequential_next(
         if card_info:
             result["fsrs"] = card_info
         _auto_register_words(sentence["text"], user_id)
+        # 确定类型：如果FSRS卡片已经学习过，标记为review
+        sentence_type = "new"
+        if card_info and card_info.get("state", 0) > 0:
+            sentence_type = "review"
         return {
             "sentence": result,
-            "type": "new",
+            "type": sentence_type,
             "mode": "sequential",
             "position": pos,
             "total": len(filtered),
@@ -971,9 +975,13 @@ async def mode_sequential_next(
         if card_info:
             result["fsrs"] = card_info
         _auto_register_words(sentence["text"], user_id)
+        # 确定类型：如果FSRS卡片已经学习过，标记为review
+        sentence_type = "new"
+        if card_info and card_info.get("state", 0) > 0:
+            sentence_type = "review"
         return {
             "sentence": result,
-            "type": "new",
+            "type": sentence_type,
             "mode": "sequential",
             "position": pos,
             "total": current_count,
@@ -1074,9 +1082,26 @@ async def mode_smart_next(
         result = await _enrich_sentence_async(chosen_sentence)
         if chosen_card:
             result["fsrs"] = chosen_card
+        
+        # 确定句子类型：即使后端标记为"new"，也要检查FSRS状态
+        # 如果卡片已经学习过（state != NEW / reps > 0），应标记为"review"
+        actual_type = card_type_chosen  # 默认使用后端类型
+        if card_type_chosen == "new" and chosen_card:
+            # 后端标记为new但有FSRS卡片信息 → 检查是否其实已学过
+            card_state = chosen_card.get("state", 0)
+            if card_state and card_state > 0:
+                actual_type = "review"
+        elif card_type_chosen == "new":
+            # 没有chosen_card信息，但句子可能已被评测过
+            # 通过FSRS卡片检查
+            card_id = f"sentence_{chosen_sentence['id']}"
+            card_info = fsrs.get_card_info(card_id, user_id)
+            if card_info and card_info.get("state", 0) > 0:
+                actual_type = "review"
+        
         result["smart_score"] = round(chosen_score, 2)
         _auto_register_words(chosen_sentence["text"], user_id)
-        return {"sentence": result, "type": card_type_chosen, "mode": "smart"}
+        return {"sentence": result, "type": actual_type, "mode": "smart"}
 
     # 2. 自适应推荐新句子（使用评分函数排序候选句子）
     weakness = learning.get_weakness_profile(user_id)
@@ -1102,16 +1127,28 @@ async def mode_smart_next(
         chosen_idx = random.randint(0, top_n - 1)
         chosen_score, chosen_sentence = scored_sentences[chosen_idx]
         fsrs.ensure_card(f"sentence_{chosen_sentence['id']}", card_type="sentence", user_id=user_id)
+        card_info = fsrs.get_card_info(f"sentence_{chosen_sentence['id']}", user_id)
         enriched = await _enrich_sentence_async(chosen_sentence)
         enriched["smart_score"] = round(chosen_score, 2)
+        if card_info:
+            enriched["fsrs"] = card_info
         _auto_register_words(chosen_sentence["text"], user_id)
-        return {"sentence": enriched, "type": "new", "mode": "smart"}
+        # 检查是否已学过
+        sentence_type = "new"
+        if card_info and card_info.get("state", 0) > 0:
+            sentence_type = "review"
+        return {"sentence": enriched, "type": sentence_type, "mode": "smart"}
 
     # 3. Fallback
     sentence = random.choice(PRESET_SENTENCES)
     enriched = await _enrich_sentence_async(sentence)
     _auto_register_words(sentence["text"], user_id)
-    return {"sentence": enriched, "type": "new", "mode": "smart"}
+    # 检查是否已学过
+    card_info = fsrs.get_card_info(f"sentence_{sentence['id']}", user_id)
+    sentence_type = "new"
+    if card_info and card_info.get("state", 0) > 0:
+        sentence_type = "review"
+    return {"sentence": enriched, "type": sentence_type, "mode": "smart"}
 
 
 @app.get("/api/mode/status")
@@ -2610,14 +2647,16 @@ def _auto_register_words(sentence_text: str, user_id: str):
     """自动注册句子中的所有单词为 FSRS 卡片（确保单词复习系统覆盖所有遇到过的单词）
     
     每个新出现的单词都要记录，但不重复。这是"待复习"功能正常工作的前提。
+    过滤功能词、缩写、标点等，只注册有学习价值的实词。
     """
     try:
+        from learning_algorithm import _clean_word
         fsrs = get_fsrs_db()
         words = sentence_text.lower().split()
         for w in words:
-            # 清理标点
-            w_clean = w.strip(".,!?;:'\"()-")
-            if w_clean and len(w_clean) > 1:  # 跳过单字母和空
+            # 使用统一的清理函数过滤功能词、缩写、标点
+            w_clean = _clean_word(w)
+            if w_clean:
                 card_id = f"word_{w_clean}"
                 fsrs.ensure_card(card_id, card_type="word", user_id=user_id)
     except Exception as e:
@@ -2756,6 +2795,10 @@ async def metacognition_profile(user: dict = Depends(get_current_user)):
     try:
         meta = get_metacognition()
         profile = meta.get_cognitive_profile(user_id)
+        # 添加图标和名称
+        from metacognition import ARCHETYPE_ICONS
+        profile["archetype_name"] = profile.get("archetype", "学习者")
+        profile["archetype_icon"] = ARCHETYPE_ICONS.get(profile.get("archetype", ""), "🧠")
         return profile
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取认知画像失败: {str(e)}")

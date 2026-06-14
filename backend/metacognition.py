@@ -70,6 +70,15 @@ ARCHETYPE_DESCRIPTIONS = {
     ARCHETYPE_ANXIOUS: "你对学习内容缺乏信心，即使是简单的内容也容易标记为「不会」。需要从简单内容开始建立信心。",
 }
 
+# 原型图标映射
+ARCHETYPE_ICONS = {
+    ARCHETYPE_SPEED_EATER: "🐇",
+    ARCHETYPE_PERFECTIONIST: "🎯",
+    ARCHETYPE_STEADY: "🧘",
+    ARCHETYPE_OVERCONFIDENT: "😎",
+    ARCHETYPE_ANXIOUS: "😰",
+}
+
 # 原型优势映射
 ARCHETYPE_STRENGTHS = {
     ARCHETYPE_SPEED_EATER: ["学习动力强", "接触面广", "不畏惧新内容"],
@@ -293,49 +302,74 @@ class MetacognitionEngine:
     # ================================================================
 
     def _compute_speed(self, user_id: str) -> float:
-        """计算速度指标：最近7天平均每日复习数的归一化值
+        """计算速度指标：最近7天平均每日评测数的归一化值
 
-        归一化方式：reviews_per_day / 20（每日20次以上复习视为速度满分）
-        这样返回值在 [0, 1] 范围内，更合理地表示学习速度。
+        改进：使用实际的活跃天数（有评测记录的天数），而不是估算。
+        归一化方式：reviews_per_day / 10（每日10次以上评测视为速度满分）
 
         Returns:
             speed (float): 速度指标 [0, 1]
         """
-        fsrs = self._get_fsrs_db()
-        if not fsrs:
+        learning = self._get_learning_algorithm()
+        if not learning:
             return 0.0
 
         try:
-            conn = fsrs._get_conn()
+            conn = _get_conn(learning.db_path)
             seven_days_ago = time.time() - 7 * 86400
+            # 使用评测记录而非FSRS复习记录，因为评测是实际练习量
             count = conn.execute(
-                "SELECT COUNT(*) FROM review_log WHERE user_id = ? AND review_time >= ?",
+                "SELECT COUNT(*) FROM user_evaluations WHERE user_id = ? AND evaluated_at >= ?",
                 (user_id, seven_days_ago)
             ).fetchone()[0]
+            
+            # 计算实际活跃天数
+            active_days_row = conn.execute(
+                "SELECT COUNT(DISTINCT DATE(evaluated_at, 'unixepoch', 'localtime')) FROM user_evaluations WHERE user_id = ? AND evaluated_at >= ?",
+                (user_id, seven_days_ago)
+            ).fetchone()
             conn.close()
 
-            if count == 0:
+            if count == 0 or not active_days_row or active_days_row[0] == 0:
                 return 0.0
 
-            # 计算实际活跃天数
-            active_days = max(1, min(7, count))  # 估算活跃天数
+            active_days = active_days_row[0]
             reviews_per_day = count / active_days
 
-            # 归一化：每日20次以上视为速度满分1.0
-            speed = min(1.0, reviews_per_day / 20.0)
+            # 归一化：每日10次以上视为速度满分1.0
+            speed = min(1.0, reviews_per_day / 10.0)
             return round(speed, 4)
         except Exception:
             return 0.0
 
     def _compute_retention(self, user_id: str) -> float:
-        """计算保持率指标：最近30次复习中 rating>=3 的比例
+        """计算保持率指标：基于评测得分的记忆保持率
 
-        FSRS 评级: 1=Again, 2=Hard, 3=Good, 4=Easy
-        rating >= 3 表示成功回忆。
+        改进：使用实际评测得分（而非仅FSRS评级），
+        因为评测得分是客观的发音质量指标，FSRS评级可能有主观偏差。
+        保持率 = 最近评测平均得分 / 100
+
+        如果评测数据不足，则回退到FSRS复习记录。
 
         Returns:
             retention (float): 保持率 [0, 1]
         """
+        # 优先使用评测得分
+        learning = self._get_learning_algorithm()
+        if learning:
+            try:
+                conn = _get_conn(learning.db_path)
+                avg_row = conn.execute(
+                    "SELECT AVG(overall_score) FROM (SELECT overall_score FROM user_evaluations WHERE user_id = ? ORDER BY evaluated_at DESC LIMIT 20)",
+                    (user_id,)
+                ).fetchone()
+                conn.close()
+                if avg_row and avg_row[0] is not None:
+                    return round(avg_row[0] / 100.0, 4)
+            except Exception:
+                pass
+
+        # 回退：使用FSRS复习记录
         fsrs = self._get_fsrs_db()
         if not fsrs:
             return 0.0
@@ -357,38 +391,56 @@ class MetacognitionEngine:
             return 0.0
 
     def _compute_coverage(self, user_id: str) -> float:
-        """计算覆盖面指标：用户尝试过的不同句子卡片占所有可用句子卡片的比例
+        """计算覆盖面指标：用户评测过的句子占所有可用句子的比例
 
-        只计算 sentence 类型卡片，不包含 word 类型（word 数量太多会严重拉低覆盖率）
+        改进：使用评测记录（user_evaluations）而非仅FSRS卡片状态，
+        因为评测记录是用户实际练习过的句子，FSRS卡片可能只是被自动注册但未练习。
 
         Returns:
             coverage (float): 覆盖率 [0, 1]
         """
-        fsrs = self._get_fsrs_db()
-        if not fsrs:
+        learning = self._get_learning_algorithm()
+        if not learning:
             return 0.0
 
         try:
-            conn = fsrs._get_conn()
-            # 用户尝试过的句子卡片数（state != NEW 表示已学过）
+            conn = _get_conn(learning.db_path)
+            # 用户评测过的不同句子数
             attempted = conn.execute(
-                "SELECT COUNT(*) FROM cards WHERE user_id = ? AND card_type = 'sentence' AND state != 0",
-                (user_id,)
-            ).fetchone()[0]
-
-            # 总可用句子卡片数
-            total = conn.execute(
-                "SELECT COUNT(*) FROM cards WHERE user_id = ? AND card_type = 'sentence'",
+                "SELECT COUNT(DISTINCT sentence_id) FROM user_evaluations WHERE user_id = ?",
                 (user_id,)
             ).fetchone()[0]
             conn.close()
-
-            if total == 0:
-                return 0.0
-
-            return round(attempted / total, 4)
         except Exception:
+            attempted = 0
+
+        # 总可用句子数：从PRESET_SENTENCES获取
+        try:
+            import json
+            from pathlib import Path
+            sentences_path = Path(__file__).parent / "sentences.json"
+            if sentences_path.exists():
+                with open(sentences_path, 'r', encoding='utf-8') as f:
+                    total = len(json.load(f))
+            else:
+                # 回退：从FSRS获取
+                fsrs = self._get_fsrs_db()
+                if fsrs:
+                    conn = fsrs._get_conn()
+                    total = conn.execute(
+                        "SELECT COUNT(*) FROM cards WHERE user_id = ? AND card_type = 'sentence'",
+                        (user_id,)
+                    ).fetchone()[0]
+                    conn.close()
+                else:
+                    total = 0
+        except Exception:
+            total = 0
+
+        if total == 0:
             return 0.0
+
+        return round(min(1.0, attempted / total), 4)
 
     def _compute_confidence_accuracy_gap(self, user_id: str) -> float:
         """计算信心-准确度差距
@@ -1429,6 +1481,8 @@ class MetacognitionEngine:
     def get_learning_insights(self, user_id: str) -> Dict:
         """获取学习洞察 — 基于所有数据生成可操作的建议
 
+        改进：增加音素薄弱项建议、单词发音/听写针对性建议。
+
         Args:
             user_id: 用户ID
 
@@ -1454,7 +1508,7 @@ class MetacognitionEngine:
         again_rate = metrics.get("again_rate", 0)
         easy_rate = metrics.get("easy_rate", 0)
 
-        # 速度洞察（speed 已归一化到 0-1）
+        # 速度洞察
         if speed > 0.8:
             insights.append("你的复习速度非常快，但过快可能影响记忆深度")
             action_items.append("尝试在每次评级前多思考5秒")
@@ -1497,6 +1551,38 @@ class MetacognitionEngine:
             insights.append("你很少使用 Easy 评级，可能过于保守")
             action_items.append("对真正掌握的内容可以给 Easy，这样能加快进度")
 
+        # 音素薄弱项建议（从 learning_algorithm 获取）
+        try:
+            learning = self._get_learning_algorithm()
+            if learning:
+                weakness = learning.get_weakness_profile(user_id)
+                phoneme_weaknesses = weakness.get("phoneme_weaknesses", [])
+                if phoneme_weaknesses:
+                    severe = [p for p in phoneme_weaknesses if p.get("level") == "severe"]
+                    moderate = [p for p in phoneme_weaknesses if p.get("level") == "moderate"]
+                    if severe:
+                        severe_phonemes = ", ".join([p.get("phoneme", "") for p in severe[:3]])
+                        insights.append(f"你有 {len(severe)} 个严重薄弱音素（{severe_phonemes}等），需要重点练习")
+                        action_items.append(f"针对性练习薄弱音素：{severe_phonemes}——尝试含这些音素的单词反复跟读")
+                    if moderate:
+                        mod_phonemes = ", ".join([p.get("phoneme", "") for p in moderate[:3]])
+                        action_items.append(f"关注中等薄弱音素：{mod_phonemes}——每天练习5分钟含这些音素的句子")
+
+                # 单词薄弱项建议
+                error_words = learning.get_error_words(user_id)
+                pron_errors = [ew for ew in error_words if ew.get("pronunciation_errors", 0) > 0]
+                dict_errors = [ew for ew in error_words if ew.get("dictation_errors", 0) > 0]
+                if pron_errors:
+                    top_pron = pron_errors[:3]
+                    words_str = ", ".join([ew["word"] for ew in top_pron])
+                    action_items.append(f"重点练习发音：{words_str}——跟读时注意舌位和口型")
+                if dict_errors:
+                    top_dict = dict_errors[:3]
+                    words_str = ", ".join([ew["word"] for ew in top_dict])
+                    action_items.append(f"加强听写练习：{words_str}——先听再写，注意字母组合规律")
+        except Exception:
+            pass
+
         # 确保有洞察
         if not insights:
             insights.append("你的学习模式比较健康，继续保持")
@@ -1522,17 +1608,23 @@ ACHIEVEMENTS = [
     {"id": "ten_practices", "name": "初学之路", "icon": "📚", "desc": "完成10次练习", "condition": "total_evaluations >= 10"},
     {"id": "fifty_practices", "name": "勤学不倦", "icon": "📖", "desc": "完成50次练习", "condition": "total_evaluations >= 50"},
     {"id": "hundred_practices", "name": "百炼成钢", "icon": "🔥", "desc": "完成100次练习", "condition": "total_evaluations >= 100"},
+    {"id": "three_hundred", "name": "学习达人", "icon": "💪", "desc": "完成300次练习", "condition": "total_evaluations >= 300"},
     {"id": "perfect_score", "name": "完美发音", "icon": "💯", "desc": "获得一次90分以上", "condition": "best_score >= 90"},
     {"id": "streak_3", "name": "三日坚持", "icon": "🎯", "desc": "连续学习3天", "condition": "streak >= 3"},
     {"id": "streak_7", "name": "一周达人", "icon": "🏆", "desc": "连续学习7天", "condition": "streak >= 7"},
+    {"id": "streak_14", "name": "两周习惯", "icon": "⭐", "desc": "连续学习14天", "condition": "streak >= 14"},
     {"id": "streak_30", "name": "月度坚持", "icon": "👑", "desc": "连续学习30天", "condition": "streak >= 30"},
     {"id": "vocab_10", "name": "词汇起步", "icon": "📝", "desc": "学习10个单词", "condition": "words_learned >= 10"},
     {"id": "vocab_50", "name": "词汇达人", "icon": "🎓", "desc": "学习50个单词", "condition": "words_learned >= 50"},
     {"id": "vocab_100", "name": "词汇大师", "icon": "🏅", "desc": "学习100个单词", "condition": "words_learned >= 100"},
     {"id": "master_5", "name": "初步掌握", "icon": "✨", "desc": "掌握5个单词", "condition": "words_mastered >= 5"},
     {"id": "master_20", "name": "炉火纯青", "icon": "💎", "desc": "掌握20个单词", "condition": "words_mastered >= 20"},
+    {"id": "master_50", "name": "词汇王者", "icon": "🏆", "desc": "掌握50个单词", "condition": "words_mastered >= 50"},
     {"id": "improve_10", "name": "明显进步", "icon": "📈", "desc": "平均分提升10分", "condition": "improvement >= 10"},
     {"id": "all_phonemes", "name": "音素探索者", "icon": "🔤", "desc": "练习过20个不同音素", "condition": "phonemes_practiced >= 20"},
+    {"id": "phoneme_50", "name": "音素专家", "icon": "🗣️", "desc": "练习过50个不同音素", "condition": "phonemes_practiced >= 50"},
+    {"id": "dictation_10", "name": "听写入门", "icon": "✏️", "desc": "完成10次听写练习", "condition": "dictation_practices >= 10"},
+    {"id": "dictation_50", "name": "听写达人", "icon": "✍️", "desc": "完成50次听写练习", "condition": "dictation_practices >= 50"},
 ]
 
 def check_achievements(user_id: str) -> dict:
@@ -1574,6 +1666,19 @@ def check_achievements(user_id: str) -> dict:
         stats["phonemes_practiced"] = conn.execute(
             "SELECT COUNT(DISTINCT phoneme) FROM user_phoneme_stats WHERE user_id = ?", (user_id,)
         ).fetchone()[0]
+        # 听写练习次数
+        dictation_row = conn.execute(
+            "SELECT COALESCE(SUM(count), 0) FROM user_word_errors WHERE user_id = ? AND error_type = 'dictation_attempt'",
+            (user_id,)
+        ).fetchone()
+        stats["dictation_practices"] = dictation_row[0] if dictation_row else 0
+        # 如果没有 dictation_attempt 记录，使用 dictation 错误记录数作为近似
+        if stats["dictation_practices"] == 0:
+            dictation_err_row = conn.execute(
+                "SELECT COALESCE(SUM(count), 0) FROM user_word_errors WHERE user_id = ? AND error_type = 'dictation'",
+                (user_id,)
+            ).fetchone()
+            stats["dictation_practices"] = dictation_err_row[0] if dictation_err_row else 0
         conn.close()
     except Exception:
         stats.setdefault("total_evaluations", 0)
@@ -1581,6 +1686,7 @@ def check_achievements(user_id: str) -> dict:
         stats.setdefault("words_learned", 0)
         stats.setdefault("words_mastered", 0)
         stats.setdefault("phonemes_practiced", 0)
+        stats.setdefault("dictation_practices", 0)
     
     # Compute streak
     try:
