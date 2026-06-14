@@ -629,11 +629,18 @@ function renderSentence() {
     const fsrsData = s.fsrs || {};
     const fsrsState = fsrsData.state_name || fsrsData.state;
     // Determine if this is truly new or a review card
-    // A card is "review" if its FSRS state is LEARNING(1), REVIEW(2), or RELEARNING(3)
-    // A card is "new" only if FSRS state is NEW(0) or the card doesn't exist yet
+    // A card is "review" if:
+    // 1. Its FSRS state is LEARNING(1), REVIEW(2), or RELEARNING(3)
+    // 2. It was explicitly loaded as type 'review'
+    // 3. It has been previously evaluated (has reps > 0 or was in session reviewed list)
+    const cardId = `sentence_${s.id}`;
+    const hasBeenReviewedInSession = S._reviewedCardIds.includes(cardId);
+    const hasFSRSProgress = fsrsData.reps !== undefined && fsrsData.reps > 0;
     const isReview = S.sentenceType === 'review' ||
                      (fsrsState && ['learning', 'review', 'relearning', 'due'].includes(fsrsState)) ||
-                     (fsrsData.state !== undefined && fsrsData.state >= 1);
+                     (fsrsData.state !== undefined && fsrsData.state >= 1) ||
+                     hasBeenReviewedInSession ||
+                     hasFSRSProgress;
 
     if (isReview) {
         el.reviewBadge.style.display = '';
@@ -2599,6 +2606,41 @@ function renderStatsContent(stats) {
         </div>
         ` : ''}
 
+        <!-- 成就系统 -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsAchievementCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+                    学习成就
+                </h4>
+                <div class="stats-section-summary">
+                    <span class="stats-badge warn" id="achievementCount">加载中...</span>
+                    <span class="stats-collapse-arrow" id="statsAchievementCollapseArrow">▼</span>
+                </div>
+            </div>
+            <div class="stats-section-body" id="statsAchievementCollapse">
+                <div id="achievementContent">
+                    <div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">加载成就...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 针对性建议 -->
+        <div class="stats-section">
+            <div class="stats-section-header" onclick="toggleStatsCollapse('statsInsightCollapse')">
+                <h4 class="stats-section-title">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                    针对性建议
+                </h4>
+                <span class="stats-collapse-arrow" id="statsInsightCollapseArrow">▼</span>
+            </div>
+            <div class="stats-section-body" id="statsInsightCollapse">
+                <div id="insightContent">
+                    <div style="text-align:center;padding:20px;color:var(--text3);font-size:13px;">分析学习中...</div>
+                </div>
+            </div>
+        </div>
+
         <!-- 练习热力图 -->
         <div class="stats-section">
             <div class="stats-section-header" onclick="toggleStatsCollapse('statsHeatmapCollapse')">
@@ -2852,6 +2894,95 @@ async function loadEnhancedStatsSections(stats) {
             const container = document.getElementById('heatmapContainer');
             if (container && data.heatmap) {
                 renderHeatmap(container, data.heatmap);
+            }
+        }
+    } catch { /* degrade */ }
+
+    // Load achievements
+    try {
+        const r = await fetchWithAuth(`${API}/api/achievements`);
+        if (r.ok) {
+            const data = await r.json();
+            const el = document.getElementById('achievementContent');
+            const countEl = document.getElementById('achievementCount');
+            if (el) {
+                const unlocked = data.unlocked || [];
+                const locked = data.locked || [];
+                const total = data.total_achievements || 0;
+                if (countEl) countEl.textContent = `${data.total_unlocked || 0}/${total}`;
+                
+                let html = '';
+                if (unlocked.length > 0) {
+                    html += '<div class="achievement-grid">';
+                    unlocked.forEach(a => {
+                        html += `<div class="achievement-item unlocked" title="${a.desc}">
+                            <span class="achievement-icon">${a.icon}</span>
+                            <span class="achievement-name">${a.name}</span>
+                        </div>`;
+                    });
+                    html += '</div>';
+                }
+                if (locked.length > 0) {
+                    html += '<div class="achievement-grid locked">';
+                    locked.slice(0, 6).forEach(a => {
+                        html += `<div class="achievement-item locked" title="${a.desc}">
+                            <span class="achievement-icon">🔒</span>
+                            <span class="achievement-name">${a.name}</span>
+                        </div>`;
+                    });
+                    if (locked.length > 6) {
+                        html += `<div class="achievement-item locked more" title="还有${locked.length - 6}个成就待解锁">
+                            <span class="achievement-icon">...</span>
+                            <span class="achievement-name">+${locked.length - 6}更多</span>
+                        </div>`;
+                    }
+                    html += '</div>';
+                }
+                if (unlocked.length === 0 && locked.length > 0) {
+                    html = '<p style="font-size:13px;color:var(--text3);padding:8px 0;">继续练习来解锁你的第一个成就！🌟</p>' + html;
+                }
+                el.innerHTML = html;
+            }
+        }
+    } catch { /* degrade */ }
+
+    // Load learning insights
+    try {
+        const r = await fetchWithAuth(`${API}/api/learning/insights`);
+        if (r.ok) {
+            const data = await r.json();
+            const el = document.getElementById('insightContent');
+            if (el) {
+                let html = '';
+                if (data.top_insight) {
+                    html += `<div class="insight-item main">
+                        <span class="insight-icon">💡</span>
+                        <span class="insight-text">${data.top_insight}</span>
+                    </div>`;
+                }
+                if (data.action_items && data.action_items.length > 0) {
+                    html += '<div class="insight-section"><h5 style="font-size:12px;color:var(--pri);margin:8px 0 4px;">🎯 行动建议</h5>';
+                    data.action_items.forEach(item => {
+                        html += `<div class="insight-item action">
+                            <span class="insight-bullet">→</span>
+                            <span class="insight-text">${item}</span>
+                        </div>`;
+                    });
+                    html += '</div>';
+                }
+                if (data.positive_feedback && data.positive_feedback.length > 0) {
+                    html += '<div class="insight-section"><h5 style="font-size:12px;color:var(--ok);margin:8px 0 4px;">✅ 做得好的</h5>';
+                    data.positive_feedback.forEach(item => {
+                        html += `<div class="insight-item positive">
+                            <span class="insight-text">${item}</span>
+                        </div>`;
+                    });
+                    html += '</div>';
+                }
+                if (!html) {
+                    html = '<p style="font-size:13px;color:var(--text3);padding:8px 0;">练习更多内容后，系统将为你生成个性化建议</p>';
+                }
+                el.innerHTML = html;
             }
         }
     } catch { /* degrade */ }

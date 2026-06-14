@@ -749,19 +749,33 @@ async def fsrs_next(
             review_cards = [q for q in queue if q["type"] == "review"]
             new_cards = [q for q in queue if q["type"] == "new"]
 
-            chosen = None
-            sentence_type = "new"
-            if review_cards:
-                chosen = random.choice(review_cards)
-                sentence_type = "review"
-            elif new_cards:
-                chosen = random.choice(new_cards)
-
-            if chosen:
-                sentence = _find_sentence_by_card_id(chosen["card_id"])
+            # 混合策略：新词70% + 复习30%
+            candidates = []
+            weights = []
+            for card in review_cards:
+                candidates.append(("review", card))
+                weights.append(3.0)
+            for card in new_cards:
+                candidates.append(("new", card))
+                weights.append(7.0)
+            
+            if candidates:
+                total_weight = sum(weights)
+                rand = random.random() * total_weight
+                cumulative = 0
+                chosen = candidates[0]
+                sentence_type = "new"
+                for c, w in zip(candidates, weights):
+                    cumulative += w
+                    if rand <= cumulative:
+                        chosen = c
+                        break
+                
+                sentence_type, chosen_card = chosen
+                sentence = _find_sentence_by_card_id(chosen_card["card_id"])
                 if sentence:
                     result = await _enrich_sentence_async(sentence)
-                    result["fsrs"] = chosen
+                    result["fsrs"] = chosen_card
                     return {"sentence": result, "type": sentence_type}
 
         sentence = random.choice(PRESET_SENTENCES)
@@ -1021,29 +1035,48 @@ async def mode_smart_next(
     if exclude:
         exclude_ids = [x.strip() for x in exclude.split(',') if x.strip()]
 
-    # 1. 优先复习到期卡片（使用评分函数排序，排除刚复习的卡片）
-    due_cards = fsrs.get_due_cards(card_type="sentence", user_id=user_id, limit=20, exclude_card_ids=exclude_ids)
-    if due_cards:
-        # Score each due card's sentence using the smart recommendation score
-        scored_cards = []
-        for card in due_cards:
-            sentence = _find_sentence_by_card_id(card["card_id"])
-            if sentence:
-                score = learning.get_smart_recommendation_score(user_id, sentence, PRESET_SENTENCES)
-                scored_cards.append((score, card, sentence))
-
-        if scored_cards:
-            # Sort by score descending - pick the highest-scored sentence
-            scored_cards.sort(key=lambda x: -x[0])
-            # Pick from top 3 with some randomness for variety
-            top_n = min(3, len(scored_cards))
-            chosen_idx = random.randint(0, top_n - 1)
-            chosen_score, chosen_card, chosen_sentence = scored_cards[chosen_idx]
-            result = await _enrich_sentence_async(chosen_sentence)
+    # 1. 混合策略：新句子约70%，到期复习约30%，避免频繁重复复习
+    # 先收集到期复习卡片和新句子卡片
+    due_cards = fsrs.get_due_cards(card_type="sentence", user_id=user_id, limit=10, exclude_card_ids=exclude_ids)
+    new_card_ids = fsrs.get_new_cards(card_type="sentence", user_id=user_id, limit=10)
+    
+    # 加权随机选择：新词70%，复习30%
+    candidates = []
+    weights = []
+    
+    for card in (due_cards or []):
+        sentence = _find_sentence_by_card_id(card["card_id"])
+        if sentence:
+            score = learning.get_smart_recommendation_score(user_id, sentence, PRESET_SENTENCES)
+            candidates.append(("review", card, sentence, score))
+            weights.append(3.0)  # 复习权重30%
+    
+    for card_id in (new_card_ids or []):
+        sentence = _find_sentence_by_card_id(card_id)
+        if sentence:
+            score = learning.get_smart_recommendation_score(user_id, sentence, PRESET_SENTENCES)
+            candidates.append(("new", None, sentence, score))
+            weights.append(7.0)  # 新词权重70%
+    
+    if candidates:
+        # 按smart score加权随机选择
+        total_weight = sum(weights)
+        rand = random.random() * total_weight
+        cumulative = 0
+        chosen_idx = 0
+        for i, w in enumerate(weights):
+            cumulative += w
+            if rand <= cumulative:
+                chosen_idx = i
+                break
+        
+        card_type_chosen, chosen_card, chosen_sentence, chosen_score = candidates[chosen_idx]
+        result = await _enrich_sentence_async(chosen_sentence)
+        if chosen_card:
             result["fsrs"] = chosen_card
-            result["smart_score"] = round(chosen_score, 2)
-            _auto_register_words(chosen_sentence["text"], user_id)
-            return {"sentence": result, "type": "review", "mode": "smart"}
+        result["smart_score"] = round(chosen_score, 2)
+        _auto_register_words(chosen_sentence["text"], user_id)
+        return {"sentence": result, "type": card_type_chosen, "mode": "smart"}
 
     # 2. 自适应推荐新句子（使用评分函数排序候选句子）
     weakness = learning.get_weakness_profile(user_id)
@@ -2800,6 +2833,29 @@ async def metacognition_session_quality(user: dict = Depends(get_current_user)):
         return quality
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取会话质量失败: {str(e)}")
+
+
+@app.get("/api/achievements")
+async def get_achievements(user: dict = Depends(get_current_user)):
+    """获取用户成就列表和进度"""
+    user_id = user.get("id", "default")
+    try:
+        from metacognition import check_achievements
+        return check_achievements(user_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取成就失败: {str(e)}")
+
+
+@app.get("/api/learning/insights")
+async def get_learning_insights(user: dict = Depends(get_current_user)):
+    """获取针对性学习建议和洞察"""
+    user_id = user.get("id", "default")
+    try:
+        meta = get_metacognition()
+        insights = meta.get_learning_insights(user_id)
+        return insights
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取学习建议失败: {str(e)}")
 
 
 # ============================================================

@@ -133,7 +133,7 @@ ARCHETYPE_STRATEGIES = {
 # 原型分类阈值
 # ============================================================
 # 速度（reviews_per_day）阈值
-SPEED_HIGH = 15.0    # 高速度
+SPEED_HIGH = 0.8    # 高速度（归一化后）
 SPEED_LOW = 5.0      # 低速度
 
 # 保持率阈值
@@ -293,10 +293,13 @@ class MetacognitionEngine:
     # ================================================================
 
     def _compute_speed(self, user_id: str) -> float:
-        """计算速度指标：最近7天平均每日复习数
+        """计算速度指标：最近7天平均每日复习数的归一化值
+
+        归一化方式：reviews_per_day / 20（每日20次以上复习视为速度满分）
+        这样返回值在 [0, 1] 范围内，更合理地表示学习速度。
 
         Returns:
-            reviews_per_day (float): 每日平均复习数
+            speed (float): 速度指标 [0, 1]
         """
         fsrs = self._get_fsrs_db()
         if not fsrs:
@@ -311,9 +314,16 @@ class MetacognitionEngine:
             ).fetchone()[0]
             conn.close()
 
-            # 7天内的日均复习数，至少1天避免除零
+            if count == 0:
+                return 0.0
+
+            # 计算实际活跃天数
             active_days = max(1, min(7, count))  # 估算活跃天数
-            return round(count / active_days, 2)
+            reviews_per_day = count / active_days
+
+            # 归一化：每日20次以上视为速度满分1.0
+            speed = min(1.0, reviews_per_day / 20.0)
+            return round(speed, 4)
         except Exception:
             return 0.0
 
@@ -347,7 +357,9 @@ class MetacognitionEngine:
             return 0.0
 
     def _compute_coverage(self, user_id: str) -> float:
-        """计算覆盖面指标：用户尝试过的不同卡片占所有可用卡片的比例
+        """计算覆盖面指标：用户尝试过的不同句子卡片占所有可用句子卡片的比例
+
+        只计算 sentence 类型卡片，不包含 word 类型（word 数量太多会严重拉低覆盖率）
 
         Returns:
             coverage (float): 覆盖率 [0, 1]
@@ -358,15 +370,15 @@ class MetacognitionEngine:
 
         try:
             conn = fsrs._get_conn()
-            # 用户尝试过的卡片数（review_log 中有记录的不同 card_id）
+            # 用户尝试过的句子卡片数（state != NEW 表示已学过）
             attempted = conn.execute(
-                "SELECT COUNT(DISTINCT card_id) FROM review_log WHERE user_id = ?",
+                "SELECT COUNT(*) FROM cards WHERE user_id = ? AND card_type = 'sentence' AND state != 0",
                 (user_id,)
             ).fetchone()[0]
 
-            # 总可用卡片数（cards 表中该用户的卡片）
+            # 总可用句子卡片数
             total = conn.execute(
-                "SELECT COUNT(*) FROM cards WHERE user_id = ?",
+                "SELECT COUNT(*) FROM cards WHERE user_id = ? AND card_type = 'sentence'",
                 (user_id,)
             ).fetchone()[0]
             conn.close()
@@ -1442,11 +1454,11 @@ class MetacognitionEngine:
         again_rate = metrics.get("again_rate", 0)
         easy_rate = metrics.get("easy_rate", 0)
 
-        # 速度洞察
-        if speed > 20:
+        # 速度洞察（speed 已归一化到 0-1）
+        if speed > 0.8:
             insights.append("你的复习速度非常快，但过快可能影响记忆深度")
             action_items.append("尝试在每次评级前多思考5秒")
-        elif speed < 3 and speed > 0:
+        elif speed < 0.15 and speed > 0:
             insights.append("你的复习速度较慢，可能在某些卡片上花了太多时间")
             action_items.append("对不确定的卡片可以先给 Again，不要纠结太久")
         else:
@@ -1499,6 +1511,148 @@ class MetacognitionEngine:
             "action_items": action_items,
             "positive_feedback": positive_feedback,
         }
+
+
+# ============================================================
+# 成就系统 (Achievement System)
+# ============================================================
+
+ACHIEVEMENTS = [
+    {"id": "first_practice", "name": "初次尝试", "icon": "🌟", "desc": "完成第一次练习", "condition": "total_evaluations >= 1"},
+    {"id": "ten_practices", "name": "初学之路", "icon": "📚", "desc": "完成10次练习", "condition": "total_evaluations >= 10"},
+    {"id": "fifty_practices", "name": "勤学不倦", "icon": "📖", "desc": "完成50次练习", "condition": "total_evaluations >= 50"},
+    {"id": "hundred_practices", "name": "百炼成钢", "icon": "🔥", "desc": "完成100次练习", "condition": "total_evaluations >= 100"},
+    {"id": "perfect_score", "name": "完美发音", "icon": "💯", "desc": "获得一次90分以上", "condition": "best_score >= 90"},
+    {"id": "streak_3", "name": "三日坚持", "icon": "🎯", "desc": "连续学习3天", "condition": "streak >= 3"},
+    {"id": "streak_7", "name": "一周达人", "icon": "🏆", "desc": "连续学习7天", "condition": "streak >= 7"},
+    {"id": "streak_30", "name": "月度坚持", "icon": "👑", "desc": "连续学习30天", "condition": "streak >= 30"},
+    {"id": "vocab_10", "name": "词汇起步", "icon": "📝", "desc": "学习10个单词", "condition": "words_learned >= 10"},
+    {"id": "vocab_50", "name": "词汇达人", "icon": "🎓", "desc": "学习50个单词", "condition": "words_learned >= 50"},
+    {"id": "vocab_100", "name": "词汇大师", "icon": "🏅", "desc": "学习100个单词", "condition": "words_learned >= 100"},
+    {"id": "master_5", "name": "初步掌握", "icon": "✨", "desc": "掌握5个单词", "condition": "words_mastered >= 5"},
+    {"id": "master_20", "name": "炉火纯青", "icon": "💎", "desc": "掌握20个单词", "condition": "words_mastered >= 20"},
+    {"id": "improve_10", "name": "明显进步", "icon": "📈", "desc": "平均分提升10分", "condition": "improvement >= 10"},
+    {"id": "all_phonemes", "name": "音素探索者", "icon": "🔤", "desc": "练习过20个不同音素", "condition": "phonemes_practiced >= 20"},
+]
+
+def check_achievements(user_id: str) -> dict:
+    """检查用户成就解锁状态
+    
+    Returns:
+        dict: {
+            "unlocked": [已解锁成就列表],
+            "locked": [未解锁成就列表],
+            "stats": 用户统计摘要,
+            "total_unlocked": 已解锁数量,
+            "total_achievements": 总成就数量,
+        }
+    """
+    from learning_algorithm import get_learning_algorithm
+    from fsrs_db import get_fsrs_db
+    
+    learning = get_learning_algorithm()
+    fsrs = get_fsrs_db()
+    
+    # Gather user stats
+    stats = {}
+    try:
+        import sqlite3 as _sql3
+        conn = _sql3.connect(learning.db_path)
+        stats["total_evaluations"] = conn.execute(
+            "SELECT COUNT(*) FROM user_evaluations WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
+        score_row = conn.execute(
+            "SELECT MAX(overall_score) FROM user_evaluations WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        stats["best_score"] = score_row[0] if score_row and score_row[0] else 0
+        stats["words_learned"] = conn.execute(
+            "SELECT COUNT(*) FROM user_word_progress WHERE user_id = ? AND attempts > 0", (user_id,)
+        ).fetchone()[0]
+        stats["words_mastered"] = conn.execute(
+            "SELECT COUNT(*) FROM user_word_progress WHERE user_id = ? AND mastered = 1", (user_id,)
+        ).fetchone()[0]
+        stats["phonemes_practiced"] = conn.execute(
+            "SELECT COUNT(DISTINCT phoneme) FROM user_phoneme_stats WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
+        conn.close()
+    except Exception:
+        stats.setdefault("total_evaluations", 0)
+        stats.setdefault("best_score", 0)
+        stats.setdefault("words_learned", 0)
+        stats.setdefault("words_mastered", 0)
+        stats.setdefault("phonemes_practiced", 0)
+    
+    # Compute streak
+    try:
+        conn = _sql3.connect(learning.db_path)
+        rows = conn.execute(
+            "SELECT DATE(evaluated_at, 'unixepoch', 'localtime') as date FROM user_evaluations WHERE user_id = ? GROUP BY date ORDER BY date DESC",
+            (user_id,)
+        ).fetchall()
+        conn.close()
+        streak = 0
+        if rows:
+            from datetime import date, timedelta
+            today = date.today()
+            for i, r in enumerate(rows):
+                d = date.fromisoformat(r[0])
+                expected = today - timedelta(days=i)
+                if d == expected:
+                    streak += 1
+                else:
+                    break
+        stats["streak"] = streak
+    except Exception:
+        stats["streak"] = 0
+    
+    # Compute improvement
+    try:
+        conn = _sql3.connect(learning.db_path)
+        early_row = conn.execute(
+            "SELECT AVG(overall_score) FROM (SELECT overall_score FROM user_evaluations WHERE user_id = ? ORDER BY evaluated_at ASC LIMIT 5)",
+            (user_id,)
+        ).fetchone()
+        recent_row = conn.execute(
+            "SELECT AVG(overall_score) FROM (SELECT overall_score FROM user_evaluations WHERE user_id = ? ORDER BY evaluated_at DESC LIMIT 5)",
+            (user_id,)
+        ).fetchone()
+        conn.close()
+        early_avg = early_row[0] if early_row and early_row[0] else 0
+        recent_avg = recent_row[0] if recent_row and recent_row[0] else 0
+        stats["improvement"] = round(recent_avg - early_avg, 1)
+    except Exception:
+        stats["improvement"] = 0
+    
+    # Evaluate each achievement
+    unlocked = []
+    locked = []
+    for ach in ACHIEVEMENTS:
+        condition = ach["condition"]
+        # Simple expression evaluation
+        try:
+            result = eval(condition, {"__builtins__": {}}, stats)
+        except Exception:
+            result = False
+        
+        entry = {
+            "id": ach["id"],
+            "name": ach["name"],
+            "icon": ach["icon"],
+            "desc": ach["desc"],
+            "unlocked": bool(result),
+        }
+        if result:
+            unlocked.append(entry)
+        else:
+            locked.append(entry)
+    
+    return {
+        "unlocked": unlocked,
+        "locked": locked,
+        "stats": stats,
+        "total_unlocked": len(unlocked),
+        "total_achievements": len(ACHIEVEMENTS),
+    }
 
 
 # ============================================================

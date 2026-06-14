@@ -2559,8 +2559,12 @@ body {
 }
 /* Heatmap cells */
 [data-theme="dark"] .heatmap-cell {
-    background: #1e293b;
+    background: #161b22;
 }
+[data-theme="dark"] .heatmap-cell.level-1 { background: #0e4429; }
+[data-theme="dark"] .heatmap-cell.level-2 { background: #006d32; }
+[data-theme="dark"] .heatmap-cell.level-3 { background: #26a641; }
+[data-theme="dark"] .heatmap-cell.level-4 { background: #39d353; }
 /* Keyboard hint */
 [data-theme="dark"] .kbd-hint {
     background: rgba(51,65,85,0.5);
@@ -2700,4 +2704,89 @@ body {
 }
 [data-theme="dark"] .word-error-chip.partial {
     background: rgba(245,158,11,0.2);
+}
+
+/* ============================================================
+   Achievement system styles
+   ============================================================ */
+.achievement-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 8px 0;
+}
+.achievement-grid.locked {
+    opacity: 0.6;
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+}
+.achievement-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    transition: transform 0.2s;
+}
+.achievement-item:hover {
+    transform: translateY(-1px);
+}
+.achievement-item.unlocked {
+    background: rgba(245,158,11,0.12);
+    border: 1px solid rgba(245,158,11,0.3);
+}
+.achievement-item.locked {
+    background: rgba(100,116,139,0.08);
+    border: 1px solid rgba(100,116,139,0.15);
+}
+.achievement-icon {
+    font-size: 18px;
+    line-height: 1;
+}
+.achievement-name {
+    font-weight: 600;
+    color: var(--text);
+}
+
+/* Insight styles */
+.insight-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    margin: 4px 0;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.insight-item.main {
+    background: rgba(99,102,241,0.08);
+    border-left: 3px solid var(--pri);
+    font-weight: 500;
+}
+.insight-item.action {
+    background: rgba(245,158,11,0.06);
+}
+.insight-item.positive {
+    background: rgba(34,197,94,0.06);
+}
+.insight-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+.insight-bullet {
+    color: var(--pri);
+    font-weight: 700;
+    flex-shrink: 0;
+}
+.insight-section {
+    margin: 4px 0;
+}
+[data-theme="dark"] .achievement-item.unlocked {
+    background: rgba(245,158,11,0.15);
+}
+[data-theme="dark"] .insight-item.main {
+    background: rgba(99,102,241,0.12);
 }
