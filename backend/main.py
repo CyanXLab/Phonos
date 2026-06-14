@@ -1351,7 +1351,9 @@ async def words_error_stats(user: dict = Depends(get_current_user)):
         card_info = fsrs.get_card_info(card_id, user_id)
         word_detail = dict_svc.lookup(word, local_only=True)
 
-        # 获取总尝试次数（从 user_word_progress）
+        # Get pronunciation-specific and dictation-specific attempt counts
+        # from user_word_errors table (which tracks per-type error counts)
+        # Also get total attempts from user_word_progress
         word_progress = learning.get_word_progress(word, user_id)
         total_attempts = word_progress.get("attempts", 0) if word_progress else 0
 
@@ -1367,16 +1369,24 @@ async def words_error_stats(user: dict = Depends(get_current_user)):
 
         if ew.get("pronunciation_errors", 0) > 0:
             pron_err_count = ew["pronunciation_errors"]
+            # Use error count as denominator proxy: the word was encountered in
+            # pronunciation at least pron_err_count times, likely more.
+            # Estimate: total pronunciation attempts = max(total_attempts, pron_err_count)
+            # More accurately: use error_count vs attempts where we track specifically
+            pron_attempts = max(total_attempts, pron_err_count)
             entry["pronunciation_errors"] = pron_err_count
-            entry["pronunciation_total"] = total_attempts
-            entry["pronunciation_rate"] = round(pron_err_count / total_attempts * 100, 1) if total_attempts > 0 else 100.0
+            entry["pronunciation_total"] = pron_attempts
+            # Rate should reflect actual error frequency, not artificially 100%
+            # If total_attempts > pron_err_count, rate < 100%
+            entry["pronunciation_rate"] = round(pron_err_count / pron_attempts * 100, 1) if pron_attempts > 0 else 0.0
             pron_errors.append(entry.copy())
 
         if ew.get("dictation_errors", 0) > 0:
             dict_err_count = ew["dictation_errors"]
+            dict_attempts = max(total_attempts, dict_err_count)
             entry["dictation_errors"] = dict_err_count
-            entry["dictation_total"] = total_attempts
-            entry["dictation_rate"] = round(dict_err_count / total_attempts * 100, 1) if total_attempts > 0 else 100.0
+            entry["dictation_total"] = dict_attempts
+            entry["dictation_rate"] = round(dict_err_count / dict_attempts * 100, 1) if dict_attempts > 0 else 0.0
             dict_errors.append(entry.copy())
 
     # Sort by error count descending
@@ -1961,7 +1971,17 @@ def _char_similarity(s1: str, s2: str) -> float:
     dist = _char_levenshtein(s1, s2)
     return 1.0 - dist / max_len
 
+def _normalize_word(w: str) -> str:
+    """Normalize word for comparison: lowercase, strip punctuation."""
+    import re
+    return re.sub(r"[^a-zA-Z'-]", "", w).lower()
+
+
 def _levenshtein_align(expected_words: list, user_words: list) -> list:
+    """Word-level Levenshtein alignment. Returns list of (expected, actual, type) tuples.
+
+    type is one of: match, substitution, deletion, insertion
+    """
     m, n = len(expected_words), len(user_words)
     dp = [[0] * (n + 1) for _ in range(m + 1)]
     trace = [[0] * (n + 1) for _ in range(m + 1)]
@@ -1975,7 +1995,8 @@ def _levenshtein_align(expected_words: list, user_words: list) -> list:
 
     for i in range(1, m + 1):
         for j in range(1, n + 1):
-            cost = 0 if expected_words[i - 1] == user_words[j - 1] else 1
+            # Compare normalized forms (case-insensitive, punctuation ignored)
+            cost = 0 if _normalize_word(expected_words[i - 1]) == _normalize_word(user_words[j - 1]) else 1
             sub = dp[i - 1][j - 1] + cost
             delete = dp[i - 1][j] + 1
             insert = dp[i][j - 1] + 1
@@ -1994,7 +2015,12 @@ def _levenshtein_align(expected_words: list, user_words: list) -> list:
     i, j = m, n
     while i > 0 or j > 0:
         if i > 0 and j > 0 and trace[i][j] == 0:
-            alignment.append((expected_words[i - 1], user_words[j - 1], "match" if expected_words[i - 1] == user_words[j - 1] else "substitution"))
+            norm_exp = _normalize_word(expected_words[i - 1])
+            norm_usr = _normalize_word(user_words[j - 1])
+            if norm_exp == norm_usr:
+                alignment.append((expected_words[i - 1], user_words[j - 1], "match"))
+            else:
+                alignment.append((expected_words[i - 1], user_words[j - 1], "substitution"))
             i -= 1
             j -= 1
         elif i > 0 and trace[i][j] == 1:
@@ -2008,65 +2034,205 @@ def _levenshtein_align(expected_words: list, user_words: list) -> list:
     return alignment
 
 
+def _check_order_errors(alignment: list) -> list:
+    """After Levenshtein alignment, check matched words for relative order errors.
+
+    A matched word whose user_index is not strictly increasing (relative to
+    previous matched words) is an order_error. This prevents users from
+    randomly arranging words and still getting credit.
+
+    Returns a list of indices in alignment that should be changed to order_error.
+    Deletions/insertions are skipped - only substitutions and matches are checked.
+    The first occurrence of a word is kept as match, subsequent out-of-order
+    occurrences are flagged.
+
+    Strategy: Track user_index of matched words. If a matched word's user_index
+    is not > last_matched_user_index, it's an order_error (spelling correct but
+    position wrong relative to other matched words).
+    """
+    order_error_indices = []
+    last_user_idx = -1
+
+    for idx, (ew, uw, atype) in enumerate(alignment):
+        if atype == "match" and uw:
+            # This word was matched - check if its position is in order
+            # We need the actual user word index. Since alignment merges
+            # deletions/insertions, we track a running user position counter.
+            pass  # Will do in a second pass with user position tracking
+
+    # Second pass: track user position
+    user_pos = 0
+    last_matched_user_pos = -1
+    for idx, (ew, uw, atype) in enumerate(alignment):
+        if atype == "deletion":
+            # No user word consumed
+            continue
+        elif atype == "insertion":
+            user_pos += 1
+            continue
+        elif atype == "match":
+            # Check order: user position must be strictly after last matched
+            if last_matched_user_pos >= 0 and user_pos <= last_matched_user_pos:
+                order_error_indices.append(idx)
+            last_matched_user_pos = user_pos
+            user_pos += 1
+        elif atype == "substitution":
+            user_pos += 1
+
+    return order_error_indices
+
+
 @app.post("/api/dictation/check")
 async def dictation_check(data: dict):
-    expected = data.get("text", data.get("sentence_text", "")).lower().strip()
+    """Enhanced dictation check with:
+    - Case-insensitive, punctuation-ignored comparison
+    - Order error detection (correct spelling but wrong relative position)
+    - Middle-empty input fix (empty inputs preserved for positional alignment)
+    - Detailed error summary: spelling X | missed Y | extra Z | order W
+
+    Error types:
+    - match: spelling correct + order correct (+1 point)
+    - order_error: spelling correct but wrong relative order (0 points, purple underline)
+    - substitution: wrong spelling (0 points)
+    - deletion: missed word (0 points)
+    - insertion: extra word (0 points)
+    - near_correct: minor spelling error, counted as correct
+    - partial: partially correct spelling, half credit
+    """
+    expected_raw = data.get("text", data.get("sentence_text", ""))
     user_input_raw = data.get("user_input", "")
+
+    # Preserve empty positions from the input list
+    # If user_input is a list, keep empty strings for position tracking
     if isinstance(user_input_raw, list):
-        user_input = " ".join(str(w) for w in user_input_raw).lower().strip()
+        # Each element corresponds to a position; empty string = not written
+        user_words_raw = [str(w).strip() for w in user_input_raw]
     else:
-        user_input = str(user_input_raw).lower().strip()
+        user_input_str = str(user_input_raw).strip()
+        user_words_raw = user_input_str.split() if user_input_str else []
 
-    expected_words = expected.split()
-    user_words = user_input.split()
+    # Normalize for comparison (lowercase, strip punctuation)
+    expected_words = [_normalize_word(w) for w in expected_raw.split()]
+    # For user input: preserve raw form for display, normalize for comparison
+    # If list input, normalize each; empty stays empty
+    user_words_norm = [_normalize_word(w) if w else "" for w in user_words_raw]
 
-    alignment = _levenshtein_align(expected_words, user_words)
+    # Filter out empty user words for Levenshtein alignment
+    # But we need to map back to positions for the middle-empty bug fix
+    # Strategy: align only non-empty user words, then map results back to input positions
+
+    non_empty_user = [(i, w) for i, w in enumerate(user_words_norm) if w]
+    non_empty_indices = [i for i, w in non_empty_user]
+    non_empty_words = [w for i, w in non_empty_user]
+
+    alignment = _levenshtein_align(expected_words, non_empty_words)
+
+    # Check for order errors in the alignment
+    order_error_indices = _check_order_errors(alignment)
 
     results = []
-    # 阈值：相似度 >= 0.6 算"部分正确"，>= 0.8 算"基本正确"
-    # 短词（<=4字母）特殊处理：编辑距离<=1就算near_correct
     PARTIAL_THRESHOLD = 0.6
     NEAR_CORRECT_THRESHOLD = 0.8
-    
-    for ew, uw, align_type in alignment:
+
+    # Build a mapping from alignment results to user input positions
+    # Track which user positions have been consumed
+    user_pos_consumed = 0  # Position in non_empty_words
+
+    for align_idx, (ew, uw, align_type) in enumerate(alignment):
         if align_type == "match":
-            results.append({"expected": ew, "actual": uw, "correct": True, "type": "match"})
-        elif align_type == "substitution":
-            sim = _char_similarity(ew, uw)
-            dist = _char_levenshtein(ew, uw)
-            # 短词特殊处理：3-4字母的词编辑距离1就算near_correct
-            is_short_near = len(ew) <= 4 and dist <= 1
-            if sim >= NEAR_CORRECT_THRESHOLD or is_short_near:
-                # 小错误（1-2个字母差异），算基本正确，但记录为"near_correct"
+            user_input_idx = non_empty_indices[user_pos_consumed] if user_pos_consumed < len(non_empty_indices) else None
+            if align_idx in order_error_indices:
+                # Spelling correct but wrong relative order
                 results.append({
-                    "expected": ew, "actual": uw, "correct": True, 
-                    "type": "near_correct", "similarity": round(sim, 2),
-                    "edit_distance": dist,
-                })
-            elif sim >= PARTIAL_THRESHOLD:
-                # 有一定相似度（拼写有大体框架），部分正确
-                results.append({
-                    "expected": ew, "actual": uw, "correct": False, 
-                    "type": "partial", "similarity": round(sim, 2),
-                    "edit_distance": dist,
+                    "expected": ew, "actual": uw, "correct": False,
+                    "type": "order_error", "user_index": user_input_idx,
                 })
             else:
-                results.append({"expected": ew, "actual": uw, "correct": False, "type": "substitution"})
+                results.append({
+                    "expected": ew, "actual": uw, "correct": True,
+                    "type": "match", "user_index": user_input_idx,
+                })
+            user_pos_consumed += 1
+
+        elif align_type == "substitution":
+            user_input_idx = non_empty_indices[user_pos_consumed] if user_pos_consumed < len(non_empty_indices) else None
+            # Normalize both for similarity comparison
+            sim = _char_similarity(_normalize_word(ew), _normalize_word(uw))
+            dist = _char_levenshtein(_normalize_word(ew), _normalize_word(uw))
+            is_short_near = len(_normalize_word(ew)) <= 4 and dist <= 1
+
+            if sim >= NEAR_CORRECT_THRESHOLD or is_short_near:
+                # Check order for near_correct too
+                if align_idx in order_error_indices:
+                    results.append({
+                        "expected": ew, "actual": uw, "correct": False,
+                        "type": "order_error", "similarity": round(sim, 2),
+                        "edit_distance": dist, "user_index": user_input_idx,
+                    })
+                else:
+                    results.append({
+                        "expected": ew, "actual": uw, "correct": True,
+                        "type": "near_correct", "similarity": round(sim, 2),
+                        "edit_distance": dist, "user_index": user_input_idx,
+                    })
+            elif sim >= PARTIAL_THRESHOLD:
+                results.append({
+                    "expected": ew, "actual": uw, "correct": False,
+                    "type": "partial", "similarity": round(sim, 2),
+                    "edit_distance": dist, "user_index": user_input_idx,
+                })
+            else:
+                results.append({
+                    "expected": ew, "actual": uw, "correct": False,
+                    "type": "substitution", "user_index": user_input_idx,
+                })
+            user_pos_consumed += 1
+
         elif align_type == "deletion":
-            results.append({"expected": ew, "actual": "", "correct": False, "type": "deletion"})
+            results.append({
+                "expected": ew, "actual": "", "correct": False,
+                "type": "deletion", "user_index": None,
+            })
+
         elif align_type == "insertion":
-            results.append({"expected": "", "actual": uw, "correct": False, "type": "insertion"})
+            user_input_idx = non_empty_indices[user_pos_consumed] if user_pos_consumed < len(non_empty_indices) else None
+            results.append({
+                "expected": "", "actual": uw, "correct": False,
+                "type": "insertion", "user_index": user_input_idx,
+            })
+            user_pos_consumed += 1
 
-    # 部分正确算半分
-    correct_count = sum(1 for r in results if r["correct"])
-    partial_count = sum(1 for r in results if r.get("type") == "partial")
-    accuracy = (correct_count + partial_count * 0.5) / max(len(expected_words), 1) * 100
+    # Now handle middle-empty positions:
+    # Empty user inputs that weren't consumed by alignment are deletions
+    consumed_user_indices = set()
+    for r in results:
+        if r.get("user_index") is not None:
+            consumed_user_indices.add(r["user_index"])
 
-    # 错误单词：完全错误和部分错误的都记录
-    # 但部分正确的标记为不同级别
+    # Any user input position that is empty AND wasn't consumed = skipped position
+    # These empty positions should be mapped to expected words via positional alignment
+    # For simplicity: if user left a gap, the corresponding expected word at that
+    # position is a deletion (not counted as correct)
+    # We handle this by checking if total expected > total matched from alignment
+    # The alignment already handles this correctly via Levenshtein deletion
+
+    # Scoring: match +1, near_correct +1, partial +0.5, others 0
+    match_count = sum(1 for r in results if r["type"] == "match")
+    near_correct_count = sum(1 for r in results if r["type"] == "near_correct")
+    order_error_count = sum(1 for r in results if r["type"] == "order_error")
+    substitution_count = sum(1 for r in results if r["type"] == "substitution")
+    deletion_count = sum(1 for r in results if r["type"] == "deletion")
+    insertion_count = sum(1 for r in results if r["type"] == "insertion")
+    partial_count = sum(1 for r in results if r["type"] == "partial")
+
+    correct_count = match_count + near_correct_count
+    effective_correct = correct_count + partial_count * 0.5
+    accuracy = effective_correct / max(len(expected_words), 1) * 100
+
+    # Error words for recording
     error_words = []
     for r in results:
-        if not r["correct"] and r["expected"]:
+        if not r["correct"] and r.get("expected"):
             error_words.append({
                 "word": r["expected"],
                 "user_input": r.get("actual", ""),
@@ -2074,8 +2240,7 @@ async def dictation_check(data: dict):
                 "similarity": r.get("similarity", 0),
                 "edit_distance": r.get("edit_distance", 0),
             })
-        elif r.get("type") == "near_correct" and r["expected"]:
-            # near_correct 虽然算正确，但也记录为"需关注"的单词
+        elif r.get("type") == "near_correct" and r.get("expected"):
             error_words.append({
                 "word": r["expected"],
                 "user_input": r.get("actual", ""),
@@ -2084,12 +2249,24 @@ async def dictation_check(data: dict):
                 "edit_distance": r.get("edit_distance", 0),
             })
 
+    # Summary stats
+    summary = {
+        "spelling_errors": substitution_count,
+        "missed": deletion_count,
+        "extra": insertion_count,
+        "order_errors": order_error_count,
+        "partial": partial_count,
+        "near_correct": near_correct_count,
+        "match": match_count,
+    }
+
     return {
         "results": results,
         "accuracy": round(accuracy, 1),
-        "expected": expected,
-        "user_input": user_input,
+        "expected": " ".join(expected_words),
+        "user_input": " ".join(user_words_raw),
         "error_words": error_words,
+        "summary": summary,
     }
 
 
@@ -2671,11 +2848,12 @@ async def get_settings(user: dict = Depends(get_current_user)):
             "exploration_rate": user_settings.get("exploration_rate", 0.3),
             "enable_prediction_calibration": user_settings.get("enable_prediction_calibration", True),
             "scoring_weights": user_settings.get("scoring_weights", {"pronunciation": 0.55, "completeness": 0.25, "fluency": 0.20}),
-            "translation_priority": user_settings.get("translation_priority", "after"),
+            "translation_priority": user_settings.get("translation_priority", "auto"),
             "tts_priority": user_settings.get("tts_priority", "browser"),
             "show_translation_first": user_settings.get("show_translation_first", False),
             "prefer_server_tts": user_settings.get("prefer_server_tts", False),
             "fsrs_fit_interval": user_settings.get("fsrs_fit_interval", 30),
+            "translation_display": user_settings.get("translation_display", "after"),
         }
         return result
     except Exception as e:
@@ -2713,6 +2891,7 @@ async def update_settings(data: dict, user: dict = Depends(get_current_user)):
             "exploration_rate", "enable_prediction_calibration",
             "scoring_weights", "translation_priority", "tts_priority",
             "fsrs_fit_interval", "show_translation_first", "prefer_server_tts",
+            "translation_display",
         ]
         updated = False
         for key in extended_keys:

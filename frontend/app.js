@@ -625,8 +625,17 @@ function renderSentence() {
     el.diffBadge.textContent = s.difficulty.toUpperCase();
     el.diffBadge.className = 'diff-badge ' + s.difficulty;
 
-    // Review badge
-    if (S.sentenceType === 'review') {
+    // Review badge - use FSRS state from the sentence data if available
+    const fsrsData = s.fsrs || {};
+    const fsrsState = fsrsData.state_name || fsrsData.state;
+    // Determine if this is truly new or a review card
+    // A card is "review" if its FSRS state is LEARNING(1), REVIEW(2), or RELEARNING(3)
+    // A card is "new" only if FSRS state is NEW(0) or the card doesn't exist yet
+    const isReview = S.sentenceType === 'review' ||
+                     (fsrsState && ['learning', 'review', 'relearning', 'due'].includes(fsrsState)) ||
+                     (fsrsData.state !== undefined && fsrsData.state >= 1);
+
+    if (isReview) {
         el.reviewBadge.style.display = '';
         el.reviewBadge.textContent = '复习';
         el.reviewBadge.className = 'review-badge review';
@@ -1089,24 +1098,30 @@ async function checkDictation() {
     if (backendResults && backendResults.results) {
         let correctCount = 0;
         let partialCount = 0;
+        let orderErrorCount = 0;
         const alignmentResults = backendResults.results;
         const inputMap = new Map();
 
         let ei = 0, ui = 0;
         for (const r of alignmentResults) {
             if (r.type === 'match') {
-                inputMap.set(ui, { correct: true, type: 'match', expected: r.expected });
+                inputMap.set(r.user_index ?? ui, { correct: true, type: 'match', expected: r.expected });
                 ei++; ui++;
             } else if (r.type === 'near_correct') {
-                // 小拼写错误，算正确但标记为"需关注"
-                inputMap.set(ui, { correct: true, type: 'near_correct', expected: r.expected, actual: r.actual, similarity: r.similarity });
+                // Minor spelling error, counted as correct but flagged
+                inputMap.set(r.user_index ?? ui, { correct: true, type: 'near_correct', expected: r.expected, actual: r.actual, similarity: r.similarity });
                 ei++; ui++;
             } else if (r.type === 'partial') {
-                // 部分正确（有拼写框架但不够准确）
-                inputMap.set(ui, { correct: false, type: 'partial', expected: r.expected, actual: r.actual, similarity: r.similarity });
+                // Partially correct spelling
+                inputMap.set(r.user_index ?? ui, { correct: false, type: 'partial', expected: r.expected, actual: r.actual, similarity: r.similarity });
+                ei++; ui++;
+            } else if (r.type === 'order_error') {
+                // Spelling correct but wrong relative order
+                inputMap.set(r.user_index ?? ui, { correct: false, type: 'order_error', expected: r.expected, actual: r.actual });
+                orderErrorCount++;
                 ei++; ui++;
             } else if (r.type === 'substitution') {
-                inputMap.set(ui, { correct: false, type: 'substitution', expected: r.expected });
+                inputMap.set(r.user_index ?? ui, { correct: false, type: 'substitution', expected: r.expected });
                 ei++; ui++;
             } else if (r.type === 'deletion') {
                 ei++;
@@ -1117,11 +1132,18 @@ async function checkDictation() {
 
         inputs.forEach((input, i) => {
             const mapped = inputMap.get(i);
-            input.classList.remove('correct', 'incorrect', 'partial', 'near-correct');
+            input.classList.remove('correct', 'incorrect', 'partial', 'near-correct', 'order-error');
             if (mapped) {
                 if (mapped.type === 'near_correct') {
                     input.classList.add('correct', 'near-correct');
                     correctCount++;
+                } else if (mapped.type === 'order_error') {
+                    input.classList.add('incorrect', 'order-error');
+                    const answerEl = document.getElementById(`dictAnswer${i}`);
+                    if (answerEl) {
+                        answerEl.textContent = mapped.expected;
+                        answerEl.style.display = '';
+                    }
                 } else if (mapped.type === 'partial') {
                     input.classList.add('incorrect', 'partial');
                     partialCount++;
@@ -1142,26 +1164,45 @@ async function checkDictation() {
                     }
                 }
             } else {
+                // Empty input that wasn't consumed = missed word
                 input.classList.add('incorrect');
             }
             input.disabled = true;
         });
 
         const totalExpected = expectedWords.filter(w => w).length;
-        // near_correct 算正确，partial 算半对
+        // near_correct counts as correct, partial as half
         const effectiveCorrect = correctCount + Math.round(partialCount * 0.5);
+
+        // Build detailed summary from backend
+        const summary = backendResults.summary || {};
+        let summaryHtml = '';
+        if (Object.keys(summary).length > 0) {
+            const parts = [];
+            if (summary.spelling_errors > 0) parts.push(`<span style="color:#e74c3c">拼写${summary.spelling_errors}</span>`);
+            if (summary.missed > 0) parts.push(`<span style="color:#e67e22">漏写${summary.missed}</span>`);
+            if (summary.extra > 0) parts.push(`<span style="color:#8b5cf6">多写${summary.extra}</span>`);
+            if (summary.order_errors > 0) parts.push(`<span style="color:#9b59b6">顺序错${summary.order_errors}</span>`);
+            if (summary.near_correct > 0) parts.push(`<span style="color:#f59e0b">近似${summary.near_correct}</span>`);
+            if (parts.length > 0) {
+                summaryHtml = `<div class="dict-error-summary">${parts.join(' · ')}</div>`;
+            }
+        }
+
         el.dictationResults.style.display = '';
         el.dictationResults.innerHTML = `
             <div class="dict-result-summary">
                 <span class="correct-count">${correctCount}</span>
                 <span class="total-count">/ ${totalExpected} 正确</span>
                 ${partialCount > 0 ? `<span class="partial-hint">（${partialCount}个近似）</span>` : ''}
+                ${orderErrorCount > 0 ? `<span class="partial-hint" style="color:#9b59b6">（${orderErrorCount}个顺序错）</span>` : ''}
             </div>
+            ${summaryHtml}
         `;
         el.dictationActions.style.display = 'none';
         el.dictationTransition.style.display = '';
         S.dictationResults = { correct: correctCount, total: totalExpected, checked: true };
-        // 保存后端返回的错误词信息用于recordDictationErrors
+        // Save backend error words for recordDictationErrors
         S._dictationErrorWords = backendResults.error_words || [];
     } else {
         let correctCount = 0;
@@ -2351,6 +2392,40 @@ function renderStatsContent(stats) {
         </div>
 
         ${recommendationHTML}
+
+        <!-- Progress & Motivation Section -->
+        <div class="stats-progress-section" style="margin-bottom:16px;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <div class="stat-card" style="flex:1;min-width:100px;text-align:center;">
+                    <div style="font-size:24px;">🎯</div>
+                    <div class="sc-val">${masteredWords.length}</div>
+                    <div class="sc-label">已掌握</div>
+                    <div style="font-size:10px;color:var(--ok);margin-top:2px;">${wordsCount > 0 ? Math.round(masteredWords.length / wordsCount * 100) : 0}% 达标率</div>
+                </div>
+                <div class="stat-card" style="flex:1;min-width:100px;text-align:center;">
+                    <div style="font-size:24px;">${analytics.streak > 0 ? '🔥' : '💡'}</div>
+                    <div class="sc-val">${analytics.streak || 0}</div>
+                    <div class="sc-label">连续天数</div>
+                    <div style="font-size:10px;color:var(--warn);margin-top:2px;">${analytics.streak >= 7 ? '太棒了！' : analytics.streak >= 3 ? '坚持住！' : '加油！'}</div>
+                </div>
+                <div class="stat-card" style="flex:1;min-width:100px;text-align:center;">
+                    <div style="font-size:24px;">${improvementRate > 0 ? '📈' : improvementRate < 0 ? '📉' : '➡️'}</div>
+                    <div class="sc-val">${improvementRate > 0 ? '+' : ''}${(improvementRate || 0).toFixed(1)}</div>
+                    <div class="sc-label">进步分</div>
+                    <div style="font-size:10px;color:${improvementRate > 0 ? 'var(--ok)' : improvementRate < 0 ? 'var(--err)' : 'var(--text3)'};margin-top:2px;">${improvementRate > 5 ? '显著进步！' : improvementRate > 0 ? '稳步提升' : '继续努力'}</div>
+                </div>
+                <div class="stat-card" style="flex:1;min-width:100px;text-align:center;">
+                    <div style="font-size:24px;">✏️</div>
+                    <div class="sc-val">${allWeakWords.length}</div>
+                    <div class="sc-label">待加强</div>
+                    <div style="font-size:10px;color:var(--warn);margin-top:2px;">刻意练习</div>
+                </div>
+            </div>
+            ${allWeakWords.length > 0 && allWeakWords.length <= 10 ? `
+            <div style="margin-top:10px;padding:10px 12px;background:rgba(99,102,241,0.08);border-radius:8px;font-size:12px;color:var(--text2);">
+                <strong>💡 刻意练习建议：</strong>重点练习 ${allWeakWords.slice(0,5).map(([w]) => `<span style="color:var(--pri);font-weight:600;">${w}</span>`).join('、')}，重复练习薄弱项比广撒网更有效！
+            </div>` : ''}
+        </div>
 
         <!-- 认知画像 Section -->
         <div class="stats-cognitive-profile" id="statsCognitiveProfile">
@@ -3623,14 +3698,22 @@ function renderErrorStats(data) {
 
     let html = `
     <div style="text-align:center;margin-bottom:16px;font-size:13px;color:var(--text2);">
-        读错 <strong style="color:#e74c3c">${summary.total_pron_errors || 0}</strong> 词 · 
-        听错 <strong style="color:#e67e22">${summary.total_dict_errors || 0}</strong> 词 · 
+        🎤 读错 <strong style="color:#e74c3c">${summary.total_pron_errors || 0}</strong> 词 · 
+        ✏️ 听写错 <strong style="color:#e67e22">${summary.total_dict_errors || 0}</strong> 词 · 
         合计 <strong>${summary.total_unique_errors || 0}</strong> 词
+    </div>
+    <div style="text-align:center;margin-bottom:16px;">
+        <button class="practice-tab ${PS.tab === 'pronunciation' ? 'active' : ''}" onclick="switchErrorTab('pronunciation')" style="padding:6px 14px;font-size:12px;border-radius:16px;border:1px solid var(--border);background:${PS.tab === 'pronunciation' ? 'rgba(99,102,241,0.2)' : 'transparent'};color:${PS.tab === 'pronunciation' ? 'var(--pri)' : 'var(--text3)'};cursor:pointer;">🎤 发音错误</button>
+        <button class="practice-tab ${PS.tab === 'dictation' ? 'active' : ''}" onclick="switchErrorTab('dictation')" style="padding:6px 14px;font-size:12px;border-radius:16px;border:1px solid var(--border);background:${PS.tab === 'dictation' ? 'rgba(99,102,241,0.2)' : 'transparent'};color:${PS.tab === 'dictation' ? 'var(--pri)' : 'var(--text3)'};cursor:pointer;">✏️ 听写错误</button>
     </div>`;
 
-    // Pronunciation errors
-    html += `<div class="error-stats-section">
-        <div class="error-stats-title">🎤 经常读错的单词</div>`;
+    // Pronunciation errors - show based on active tab
+    const showPron = PS.tab === 'pronunciation' || PS.tab === 'errors';
+    const showDict = PS.tab === 'dictation' || PS.tab === 'errors';
+
+    if (showPron) {
+        html += `<div class="error-stats-section">
+            <div class="error-stats-title">🎤 经常读错的单词</div>`;
     if (pronErrors.length === 0) {
         html += '<div class="error-stats-empty">暂无读错记录 ✨</div>';
     } else {
@@ -3646,8 +3729,9 @@ function renderErrorStats(data) {
         html += '</ul>';
     }
     html += '</div>';
+    } // end if showPron
 
-    // Dictation errors
+    if (showDict) {
     html += `<div class="error-stats-section">
         <div class="error-stats-title">✏️ 经常听写错的单词</div>`;
     if (dictErrors.length === 0) {
@@ -3665,8 +3749,14 @@ function renderErrorStats(data) {
         html += '</ul>';
     }
     html += '</div>';
+    } // end if showDict
 
     content.innerHTML = html;
+}
+
+function switchErrorTab(tab) {
+    PS.tab = tab;
+    loadErrorStats();
 }
 
 // ============================================================
@@ -4061,6 +4151,25 @@ function openSettingsModal() {
                     </select>
                 </div>
             </div>
+            <div class="settings-row">
+                <span class="settings-row-label">翻译引擎</span>
+                <div class="settings-row-value">
+                    <select class="settings-select" id="setTranslationPriority">
+                        <option value="auto" ${!s.translation_priority || s.translation_priority === 'auto' ? 'selected' : ''}>自动（网络优先）</option>
+                        <option value="local" ${s.translation_priority === 'local' ? 'selected' : ''}>本地优先（离线）</option>
+                        <option value="online" ${s.translation_priority === 'online' ? 'selected' : ''}>在线优先</option>
+                    </select>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">翻译显示</span>
+                <div class="settings-row-value">
+                    <select class="settings-select" id="setTranslationDisplay">
+                        <option value="after" ${!s.translation_priority || s.translation_display !== 'first' ? 'selected' : ''}>原文后显示</option>
+                        <option value="first" ${s.translation_display === 'first' ? 'selected' : ''}>优先显示翻译</option>
+                    </select>
+                </div>
+            </div>
         </div>
 
         <!-- Action Buttons -->
@@ -4167,6 +4276,8 @@ function openSettingsModal() {
             },
             show_translation_first: document.getElementById('setTranslationFirst')?.classList.contains('active') || false,
             tts_priority: document.getElementById('setTTSPriority')?.value || 'browser',
+            translation_priority: document.getElementById('setTranslationPriority')?.value || 'auto',
+            translation_display: document.getElementById('setTranslationDisplay')?.value || 'after',
         };
 
         try {

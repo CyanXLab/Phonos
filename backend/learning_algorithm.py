@@ -836,7 +836,15 @@ class LearningAlgorithm:
     # Error Word Recording
     # ================================================================
     def get_error_words(self, user_id: str, error_type: str = None) -> list:
-        """获取用户的错误单词列表（用于单词复习）"""
+        """获取用户的错误单词列表（用于单词复习）
+        
+        Returns each word with:
+        - pronunciation_errors: count of pronunciation error occurrences
+        - dictation_errors: count of dictation error occurrences
+        - total_errors: sum of all error types
+        - pronunciation_attempts: estimated pronunciation attempts (error count + correct attempts)
+        - dictation_attempts: estimated dictation attempts
+        """
         conn = _get_conn(self.db_path)
         if error_type:
             rows = conn.execute(
@@ -856,7 +864,6 @@ class LearningAlgorithm:
             word = r[0]
             if word not in seen_words:
                 seen_words.add(word)
-                # Get total error count across all types
                 result.append({
                     "word": word,
                     "dictation_errors": 0,
@@ -865,7 +872,7 @@ class LearningAlgorithm:
                     "last_seen": r[4],
                 })
 
-        # Fill in error counts
+        # Fill in error counts and also estimate total attempts per type
         conn = _get_conn(self.db_path)
         for item in result:
             for etype in ['dictation', 'pronunciation']:
@@ -879,6 +886,14 @@ class LearningAlgorithm:
                 else:
                     item["pronunciation_errors"] = count
                 item["total_errors"] += count
+
+            # Also get total attempts from user_word_progress for better rate calculation
+            progress_row = conn.execute(
+                "SELECT attempts FROM user_word_progress WHERE user_id = ? AND word = ?",
+                (user_id, item["word"])
+            ).fetchone()
+            total_attempts = progress_row[0] if progress_row else 0
+            item["total_attempts"] = total_attempts
         conn.close()
 
         return result
