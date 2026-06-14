@@ -33,6 +33,45 @@
     --tag-paradigmatic: #8b5cf6;
 }
 
+/* Dark theme - 夜间模式 */
+[data-theme="dark"] {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --text: #e2e8f0;
+    --text2: #94a3b8;
+    --text3: #64748b;
+    --border: #334155;
+    --pri-l: #6366f1;
+}
+
+[data-theme="dark"] .header {
+    background: rgba(30,41,59,0.92);
+    border-bottom-color: var(--border);
+}
+
+[data-theme="dark"] .card {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+[data-theme="dark"] .modal {
+    background: var(--card);
+    color: var(--text);
+}
+
+[data-theme="dark"] input, [data-theme="dark"] textarea {
+    background: #0f172a;
+    color: var(--text);
+    border-color: var(--border);
+}
+
+[data-theme="dark"] .fsrs-btn {
+    border-color: var(--border);
+}
+
+[data-theme="dark"] .heatmap-cell {
+    border-color: var(--border);
+}
+
 * { margin:0; padding:0; box-sizing:border-box; }
 
 body {
@@ -51,7 +90,7 @@ body {
     position: sticky; top:0; z-index:100;
 }
 .header-inner {
-    max-width: 640px; margin:0 auto;
+    max-width: 860px; margin:0 auto;
     padding: 12px 20px;
     display:flex; justify-content:space-between; align-items:center;
 }
@@ -87,7 +126,7 @@ body {
 
 /* ---- Main ---- */
 .main {
-    max-width: 640px; margin:0 auto;
+    max-width: 860px; margin:0 auto;
     padding: 16px 16px 60px;
     display:flex; flex-direction:column; gap:14px;
 }

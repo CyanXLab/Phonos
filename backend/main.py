@@ -326,6 +326,40 @@ async def learning_analytics(user: dict = Depends(get_current_user)):
     return learning.get_analytics(user["id"])
 
 
+@app.get("/api/learning/explore-exploit")
+async def get_explore_exploit_stats(user: dict = Depends(get_current_user)):
+    """获取探索/利用统计数据"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(fsrs.db_path)
+        # Count new cards reviewed (exploration)
+        new_reviews = conn.execute(
+            "SELECT COUNT(*) FROM review_log WHERE user_id=? AND state=0",
+            (user_id,)
+        ).fetchone()[0]
+        # Count review cards reviewed (exploitation)
+        review_reviews = conn.execute(
+            "SELECT COUNT(*) FROM review_log WHERE user_id=? AND state!=0",
+            (user_id,)
+        ).fetchone()[0]
+        conn.close()
+
+        total = new_reviews + review_reviews
+        explore_ratio = new_reviews / total if total > 0 else 0.3
+
+        return {
+            "explore_ratio": round(explore_ratio, 3),
+            "exploit_ratio": round(1 - explore_ratio, 3),
+            "total_reviews": total,
+            "new_cards_reviewed": new_reviews,
+            "review_cards_reviewed": review_reviews,
+        }
+    except Exception:
+        return {"explore_ratio": 0.3, "exploit_ratio": 0.7, "total_reviews": 0, "new_cards_reviewed": 0, "review_cards_reviewed": 0}
+
+
 @app.get("/api/stats")
 async def get_user_stats(user: dict = Depends(get_current_user)):
     """获取当前用户的完整统计（从数据库，跨浏览器同步）"""
@@ -378,12 +412,18 @@ async def get_user_stats(user: dict = Depends(get_current_user)):
                 "source": "pronunciation"
             }
 
-        # 错误音素统计
+        # 错误音素统计（包含错误率百分比）
         phoneme_rows = conn2.execute(
             "SELECT phoneme, total_attempts, error_count, error_rate FROM user_phoneme_stats WHERE user_id = ? ORDER BY error_count DESC",
             (user_id,)
         ).fetchall()
-        error_phonemes = {r[0]: r[2] for r in phoneme_rows}
+        error_phonemes = {}
+        for r in phoneme_rows:
+            error_phonemes[r[0]] = {
+                "count": r[2],
+                "total": r[1],
+                "rate": round(r[3] * 100, 1) if r[3] else 0
+            }
 
         # 听写错误单词数据（合并到 words_learned）
         error_word_rows = conn2.execute(
@@ -692,11 +732,18 @@ async def fsrs_stats(user: dict = Depends(get_current_user)):
 
 
 @app.get("/api/fsrs/next")
-async def fsrs_next(card_type: str = Query("sentence"), user: dict = Depends(get_current_user)):
+async def fsrs_next(
+    card_type: str = Query("sentence"),
+    exclude: Optional[str] = Query(None, description="排除的卡片ID(逗号分隔)"),
+    user: dict = Depends(get_current_user)
+):
     user_id = user.get("id", "default")
+    exclude_ids = []
+    if exclude:
+        exclude_ids = [x.strip() for x in exclude.split(',') if x.strip()]
     try:
         fsrs = get_fsrs_db()
-        queue = fsrs.get_review_queue(card_type=card_type, user_id=user_id, new_per_day=5)
+        queue = fsrs.get_review_queue(card_type=card_type, user_id=user_id, new_per_day=5, exclude_card_ids=exclude_ids)
 
         if queue:
             review_cards = [q for q in queue if q["type"] == "review"]
@@ -960,14 +1007,22 @@ async def mode_sequential_set_range(data: dict, user: dict = Depends(get_current
 
 
 @app.get("/api/mode/smart/next")
-async def mode_smart_next(user: dict = Depends(get_current_user)):
+async def mode_smart_next(
+    exclude: Optional[str] = Query(None, description="排除的卡片ID(逗号分隔)"),
+    user: dict = Depends(get_current_user)
+):
     """智能模式：基于薄弱分析和FSRS复习历史推荐句子（增强版）"""
     user_id = user.get("id", "default")
     learning = get_learning_algorithm()
     fsrs = get_fsrs_db()
+    
+    # Parse exclude list to avoid repeating the same card
+    exclude_ids = []
+    if exclude:
+        exclude_ids = [x.strip() for x in exclude.split(',') if x.strip()]
 
-    # 1. 优先复习到期卡片（使用评分函数排序）
-    due_cards = fsrs.get_due_cards(card_type="sentence", user_id=user_id, limit=20)
+    # 1. 优先复习到期卡片（使用评分函数排序，排除刚复习的卡片）
+    due_cards = fsrs.get_due_cards(card_type="sentence", user_id=user_id, limit=20, exclude_card_ids=exclude_ids)
     if due_cards:
         # Score each due card's sentence using the smart recommendation score
         scored_cards = []
@@ -2803,15 +2858,18 @@ async def get_practice_heatmap(user: dict = Depends(get_current_user)):
         import sqlite3
         conn = sqlite3.connect(learning.db_path)
         # Get daily practice counts for the last 365 days
+        # evaluated_at is Unix timestamp, must use 'unixepoch' modifier
+        now_ts = time.time()
+        year_ago_ts = now_ts - 365 * 86400
         rows = conn.execute("""
-            SELECT DATE(evaluated_at) as date, 
+            SELECT DATE(evaluated_at, 'unixepoch', 'localtime') as date, 
                    COUNT(*) as count, 
                    AVG(overall_score) as avg_score
             FROM user_evaluations 
-            WHERE user_id = ? AND evaluated_at >= DATE('now', '-365 days')
-            GROUP BY DATE(evaluated_at)
+            WHERE user_id = ? AND evaluated_at >= ?
+            GROUP BY DATE(evaluated_at, 'unixepoch', 'localtime')
             ORDER BY date
-        """, (user_id,)).fetchall()
+        """, (user_id, year_ago_ts)).fetchall()
         conn.close()
         
         heatmap = {}
@@ -2847,13 +2905,20 @@ async def get_practice_history(
         
         history = []
         for r in rows:
+            # Convert Unix timestamp to ISO string for frontend
+            eval_at = r[5]
+            if eval_at and eval_at > 0:
+                from datetime import datetime
+                eval_at_str = datetime.fromtimestamp(eval_at).isoformat()
+            else:
+                eval_at_str = None
             history.append({
                 "sentence_id": r[0],
                 "overall_score": round(r[1], 1),
                 "pronunciation_score": round(r[2], 1),
                 "completeness_score": round(r[3], 1),
                 "fluency_score": round(r[4], 1),
-                "evaluated_at": r[5],
+                "evaluated_at": eval_at_str,
                 "duration": r[6],
             })
         
@@ -2927,6 +2992,39 @@ async def set_sentence_state(data: dict, user: dict = Depends(get_current_user))
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sentences/bookmarked")
+async def get_bookmarked_sentences(user: dict = Depends(get_current_user)):
+    """获取用户收藏的句子列表"""
+    user_id = user.get("id", "default")
+    try:
+        fsrs = get_fsrs_db()
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(fsrs.db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS card_states (
+                card_id TEXT, user_id TEXT, bookmarked INTEGER DEFAULT 0, mastered INTEGER DEFAULT 0,
+                PRIMARY KEY (card_id, user_id)
+            )
+        """)
+        rows = conn.execute(
+            "SELECT card_id FROM card_states WHERE user_id=? AND bookmarked=1",
+            (user_id,)
+        ).fetchall()
+        conn.close()
+
+        sentences = []
+        for (card_id,) in rows:
+            sentence = _find_sentence_by_card_id(card_id)
+            if sentence:
+                enriched = await _enrich_sentence_async(sentence)
+                enriched["card_id"] = card_id
+                sentences.append(enriched)
+
+        return {"sentences": sentences, "total": len(sentences)}
+    except Exception as e:
+        return {"sentences": [], "total": 0}
 
 
 # 挂载前端

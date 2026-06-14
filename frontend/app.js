@@ -81,6 +81,7 @@ const S = {
     calibrationEnabled: false,   // Auto-detected from /api/metacognition/profile
     abPhase: null,               // 'A' | 'B' | null - A/B compare playback phase
     bookmarked: false,           // Whether current sentence is bookmarked
+    _lastReviewedCardId: null,   // Track last reviewed card to avoid repetition
     // --- Settings state ---
     settings: null,              // Cached settings from /api/settings
 };
@@ -322,6 +323,8 @@ const el = {
     btnWordPractice: $('btnWordPractice'),
     // New UI elements
     btnCognitiveMirror: $('btnCognitiveMirror'),
+    btnBookmarks: $('btnBookmarks'),
+    btnTheme: $('btnTheme'),
     btnSettings: $('btnSettings'),
     cognitiveMirrorModal: $('cognitiveMirrorModal'),
     closeCognitiveMirrorModal: $('closeCognitiveMirrorModal'),
@@ -499,7 +502,11 @@ async function loadSentence(forceNew = false) {
                     }
                 } else {
                     // Smart mode (FSRS-based)
-                    const r = await fetchWithAuth(`${API}/api/mode/smart/next`, {signal: AbortSignal.timeout(8000)});
+                    let smartUrl = `${API}/api/mode/smart/next`;
+                    if (S._lastReviewedCardId) {
+                        smartUrl += `?exclude=${encodeURIComponent(S._lastReviewedCardId)}`;
+                    }
+                    const r = await fetchWithAuth(smartUrl, {signal: AbortSignal.timeout(8000)});
                     if (r.ok) {
                         const d = await r.json();
                         if (d.sentence) {
@@ -515,7 +522,11 @@ async function loadSentence(forceNew = false) {
         // Fallback: try FSRS queue
         if (!loaded && !forceNew) {
             try {
-                const r = await fetchWithAuth(`${API}/api/fsrs/next`, {signal: AbortSignal.timeout(8000)});
+                let fsrsUrl = `${API}/api/fsrs/next`;
+                if (S._lastReviewedCardId) {
+                    fsrsUrl += `?exclude=${encodeURIComponent(S._lastReviewedCardId)}`;
+                }
+                const r = await fetchWithAuth(fsrsUrl, {signal: AbortSignal.timeout(8000)});
                 if (r.ok) {
                     const d = await r.json();
                     if (d.sentence) {
@@ -556,6 +567,7 @@ async function loadSentence(forceNew = false) {
         S._dictationErrorWords = null;
         S.fsrsRated = false;
         S.predictionScore = null;
+        S._lastReviewedCardId = null; // Clear after successful load
 
         renderSentence();
         renderDictationInputs();
@@ -1228,6 +1240,7 @@ async function submitFSRSRating(rating) {
 
         if (r.ok) {
             S.fsrsRated = true;
+            S._lastReviewedCardId = cardId; // Track to avoid repeating
             document.querySelectorAll('.fsrs-btn').forEach(btn => {
                 btn.classList.remove('selected');
                 if (parseInt(btn.dataset.rating) === rating) {
@@ -1391,6 +1404,13 @@ function bindEvents() {
     if (el.btnSettings) el.btnSettings.addEventListener('click', openSettingsModal);
     if (el.closeSettingsModal) el.closeSettingsModal.addEventListener('click', () => el.settingsModal.style.display = 'none');
     if (el.settingsModal) el.settingsModal.addEventListener('click', e => { if (e.target === el.settingsModal) el.settingsModal.style.display = 'none'; });
+
+    // Bookmarks modal events
+    if (el.btnBookmarks) el.btnBookmarks.addEventListener('click', openBookmarksModal);
+
+    // Theme toggle
+    if (el.btnTheme) el.btnTheme.addEventListener('click', toggleTheme);
+    initTheme();
 
     // Prediction slider
     if (el.predictionSlider) el.predictionSlider.addEventListener('input', () => {
@@ -2144,7 +2164,8 @@ function renderStatsContent(stats) {
     const avg = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1) : 0;
     const best = scores.length ? Math.max(...scores) : 0;
     const wordsCount = Object.keys(wordsLearned).length;
-    const totalErrorCount = Object.values(errors).reduce((a, b) => a + b, 0);
+    // Support both old format {phoneme: count} and new format {phoneme: {count, total, rate}}
+    const totalErrorCount = Object.values(errors).reduce((a, b) => a + (typeof b === 'object' ? b.count : b), 0);
     const errorPhonemeCount = Object.keys(errors).length;
 
     // Greeting section
@@ -2194,14 +2215,17 @@ function renderStatsContent(stats) {
     }
 
     // Error phonemes: full list sorted by frequency
+    // Normalize error data: support both {phoneme: count} and {phoneme: {count, total, rate}}
     const allErrors = Object.entries(errors)
-        .sort((a, b) => b[1] - a[1]);
+        .map(([p, v]) => [p, typeof v === 'object' ? v : {count: v, total: v, rate: 0}])
+        .sort((a, b) => b[1].count - a[1].count);
 
     // Top 5 for summary
     const topErrorsSummary = allErrors.slice(0, 5)
-        .map(([p, c]) => {
+        .map(([p, v]) => {
             const ipa = ARPABET_TO_IPA[p] || p;
-            return `/${ipa}/ (${c}次)`;
+            const rateStr = v.rate > 0 ? ` ${v.rate}%` : '';
+            return `/${ipa}/ (${v.count}次${rateStr})`;
         })
         .join('、') || '暂无';
 
@@ -2241,17 +2265,20 @@ function renderStatsContent(stats) {
     if (allErrors.length === 0) {
         errorDetailHTML = '<p style="font-size:13px;color:var(--text3);padding:8px 0;">还没有发音错误记录，继续保持！</p>';
     } else {
-        errorDetailHTML = allErrors.map(([p, c], i) => {
+        errorDetailHTML = allErrors.map(([p, v], i) => {
             const ipa = ARPABET_TO_IPA[p] || p;
+            const c = v.count;
             const severity = c >= 5 ? 'high' : c >= 3 ? 'medium' : 'low';
             const severityColor = c >= 5 ? 'var(--err)' : c >= 3 ? 'var(--warn)' : 'var(--pri)';
-            const barWidth = Math.min(100, (c / (allErrors[0][1] || 1)) * 100);
+            const barWidth = Math.min(100, (c / (allErrors[0][1].count || 1)) * 100);
             const hidden = i >= errorInitiallyShown ? ' style="display:none;"' : '';
+            const rateStr = v.rate > 0 ? `<span class="error-detail-rate" style="color:${severityColor};font-size:11px;margin-left:6px;">${v.rate}%读错</span>` : '';
             return `<div class="error-detail-item" data-index="${i}"${hidden}>
                 <div class="error-detail-header">
                     <span class="error-detail-ipa">/${ipa}/</span>
                     <span class="error-detail-arpabet">${p}</span>
                     <span class="error-detail-count" style="color:${severityColor};">${c}次</span>
+                    ${rateStr}
                 </div>
                 <div class="error-detail-bar">
                     <div class="error-detail-bar-fill" style="width:${barWidth}%;background:${severityColor};"></div>
@@ -2376,12 +2403,15 @@ function renderStatsContent(stats) {
                 ` : '<p style="font-size:13px;color:var(--text3);padding:8px 0;">所有单词掌握良好！</p>'}
 
                 ${masteredWords.length > 0 ? `
-                <div class="stats-sub-title" style="margin-top:14px;">已掌握的单词</div>
-                <div class="mastered-words-grid">
-                    ${masteredWords.slice(0, 20).map(([w, d]) =>
+                <div class="stats-sub-title" style="margin-top:14px;">已掌握的单词 <span style="font-weight:400;color:var(--text3);">(${masteredWords.length}个)</span></div>
+                <div class="mastered-words-grid" id="masteredWordsGrid">
+                    ${masteredWords.slice(0, 30).map(([w, d]) =>
                         `<span class="mastered-word">${w}</span>`
                     ).join('')}
-                    ${masteredWords.length > 20 ? `<span class="mastered-word-more">+${masteredWords.length - 20}个</span>` : ''}
+                    ${masteredWords.length > 30 ? `<button class="mastered-word-more" onclick="this.parentElement.querySelectorAll('.mastered-word-hidden').forEach(e=>e.style.display='');this.remove();" style="cursor:pointer;background:none;border:1px dashed var(--border);border-radius:4px;padding:2px 8px;color:var(--text3);font-size:12px;">+${masteredWords.length - 30}个 (点击展开)</button>
+                    ${masteredWords.slice(30).map(([w, d]) =>
+                        `<span class="mastered-word mastered-word-hidden" style="display:none;">${w}</span>`
+                    ).join('')}` : ''}
                 </div>
                 ` : ''}
             </div>
@@ -2623,21 +2653,36 @@ async function loadEnhancedStatsSections(stats) {
         if (r.ok) {
             const data = await r.json();
             const el = document.getElementById('statsSemanticCoverage');
-            if (el && data.fields) {
-                const fields = data.fields;
-                const colors = ['#3498db', '#27ae60', '#e67e22', '#8b5cf6', '#e74c3c', '#1abc9c'];
-                el.innerHTML = Object.entries(fields).map(([name, pct], i) => `
-                    <div class="stats-field-bar">
-                        <span class="stats-field-name">${name}</span>
-                        <div class="stats-field-track">
-                            <div class="stats-field-fill" style="width:${Math.round(pct * 100)}%;background:${colors[i % colors.length]};"></div>
-                        </div>
-                        <span class="stats-field-pct">${Math.round(pct * 100)}%</span>
-                    </div>
-                `).join('');
+            if (el) {
+                // Backend returns {coverage: [{field, total_words, learned_words, coverage_ratio}]}
+                const fields = data.coverage || data.fields || [];
+                if (fields.length === 0) {
+                    el.innerHTML = '<p style="font-size:12px;color:var(--text3);">暂无语义场数据，开始练习后将自动构建</p>';
+                } else {
+                    const colors = ['#3498db', '#27ae60', '#e67e22', '#8b5cf6', '#e74c3c', '#1abc9c'];
+                    el.innerHTML = fields.map((f, i) => {
+                        const name = f.field || f.name || '未知';
+                        const pct = f.coverage_ratio !== undefined ? f.coverage_ratio : (f.pct || 0);
+                        const learned = f.learned_words || 0;
+                        const total = f.total_words || 0;
+                        return `<div class="stats-field-bar">
+                            <span class="stats-field-name">${name}</span>
+                            <div class="stats-field-track">
+                                <div class="stats-field-fill" style="width:${Math.round(pct * 100)}%;background:${colors[i % colors.length]};"></div>
+                            </div>
+                            <span class="stats-field-pct">${Math.round(pct * 100)}% <span style="font-size:10px;color:var(--text3);">(${learned}/${total})</span></span>
+                        </div>`;
+                    }).join('');
+                }
             }
+        } else {
+            const el = document.getElementById('statsSemanticCoverage');
+            if (el) el.innerHTML = '<p style="font-size:12px;color:var(--text3);">语义场数据暂不可用</p>';
         }
-    } catch { /* degrade */ }
+    } catch { 
+        const el = document.getElementById('statsSemanticCoverage');
+        if (el) el.innerHTML = '<p style="font-size:12px;color:var(--text3);">语义场数据加载失败</p>';
+    }
 
     // Load explore/exploit ratio
     try {
@@ -2648,6 +2693,7 @@ async function loadEnhancedStatsSections(stats) {
             if (el) {
                 const explorePct = Math.round((data.explore_ratio || 0.3) * 100);
                 const exploitPct = 100 - explorePct;
+                const totalReviews = data.total_reviews || 0;
                 el.innerHTML = `
                     <div class="stats-ee-chart">
                         <div class="stats-pie" style="--explore-pct:${explorePct}%;">
@@ -2658,11 +2704,17 @@ async function loadEnhancedStatsSections(stats) {
                             <div class="stats-ee-item"><span class="stats-ee-dot" style="background:var(--ok);"></span> 利用 (复习) ${exploitPct}%</div>
                         </div>
                     </div>
-                    <p style="font-size:12px;color:var(--text3);margin-top:10px;">探索率越高越倾向学习新内容，利用率高则侧重巩固已学内容</p>
+                    <p style="font-size:12px;color:var(--text3);margin-top:10px;">探索率越高越倾向学习新内容，利用率高则侧重巩固已学内容。共 ${totalReviews} 次复习</p>
                 `;
             }
+        } else {
+            const el = document.getElementById('statsEEContent');
+            if (el) el.innerHTML = '<p style="font-size:12px;color:var(--text3);">探索/利用数据暂不可用</p>';
         }
-    } catch { /* degrade */ }
+    } catch { 
+        const el = document.getElementById('statsEEContent');
+        if (el) el.innerHTML = '<p style="font-size:12px;color:var(--text3);">探索/利用数据加载失败</p>';
+    }
 
     // Load calibration data
     if (S.calibrationEnabled) {
@@ -4018,3 +4070,105 @@ function openSettingsModal() {
 // ============================================================
 // Enhanced Stats Dashboard
 // ============================================================
+
+// ============================================================
+// Bookmarks Modal - 收藏句子查看
+// ============================================================
+async function openBookmarksModal() {
+    let modal = document.getElementById('bookmarksModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'bookmarksModal';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal" style="max-width:600px;max-height:80vh;">
+                <div class="modal-header">
+                    <h3>⭐ 我的收藏</h3>
+                    <button class="btn-icon modal-close" onclick="document.getElementById('bookmarksModal').style.display='none'">x</button>
+                </div>
+                <div class="modal-body" id="bookmarksBody" style="overflow-y:auto;max-height:65vh;">
+                    <div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载收藏列表...</div>
+                </div>
+            </div>
+        `;
+        modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
+        document.body.appendChild(modal);
+    }
+    modal.style.display = '';
+    const body = document.getElementById('bookmarksBody');
+    body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);"><div class="spinner" style="margin:0 auto 12px;"></div>加载收藏列表...</div>';
+    
+    try {
+        const r = await fetchWithAuth(`${API}/api/sentences/bookmarked`);
+        const data = await r.json();
+        const sentences = data.sentences || [];
+        
+        if (sentences.length === 0) {
+            body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text3);font-size:14px;">暂无收藏的句子<br><span style="font-size:12px;">练习时点击书签按钮收藏句子</span></div>';
+            return;
+        }
+        
+        body.innerHTML = sentences.map(s => `
+            <div class="bookmark-item" style="padding:12px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="loadBookmarkedSentence('${s.id}')">
+                <div style="font-size:14px;font-weight:500;margin-bottom:4px;">${s.text}</div>
+                <div style="font-size:12px;color:var(--text3);">${s.translation || ''}</div>
+                <div style="font-size:11px;color:var(--text3);margin-top:4px;">
+                    <span class="diff-badge ${s.difficulty || 'medium'}" style="font-size:10px;padding:1px 6px;">${(s.difficulty || 'medium').toUpperCase()}</span>
+                </div>
+            </div>
+        `).join('');
+    } catch {
+        body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--err);">加载失败，请重试</div>';
+    }
+}
+
+async function loadBookmarkedSentence(sentenceId) {
+    const modal = document.getElementById('bookmarksModal');
+    if (modal) modal.style.display = 'none';
+    try {
+        const r = await fetchWithAuth(`${API}/api/sentence/${sentenceId}`);
+        if (r.ok) {
+            const data = await r.json();
+            if (data && data.text) {
+                S.sentence = data;
+                S.sentenceType = 'review';
+                S.mode = 'practice';
+                S.fsrsRated = false;
+                renderSentence();
+                updateModeUI();
+            }
+        }
+    } catch { /* ignore */ }
+}
+
+// ============================================================
+// Dark/Light Theme Toggle - 夜间/日间模式切换
+// ============================================================
+function initTheme() {
+    const saved = localStorage.getItem('phonos_theme');
+    if (saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        updateThemeIcon(true);
+    }
+}
+
+function toggleTheme() {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (isDark) {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('phonos_theme', 'light');
+    } else {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        localStorage.setItem('phonos_theme', 'dark');
+    }
+    updateThemeIcon(!isDark);
+}
+
+function updateThemeIcon(isDark) {
+    const icon = document.getElementById('themeIcon');
+    if (icon) {
+        icon.innerHTML = isDark 
+            ? '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>'
+            : '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+    }
+}

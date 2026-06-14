@@ -1178,18 +1178,28 @@ class FSRSDatabase:
         except Exception:
             pass
 
-    def get_due_cards(self, card_type: str = "sentence", user_id: str = "default", limit: int = 20) -> List[dict]:
+    def get_due_cards(self, card_type: str = "sentence", user_id: str = "default", limit: int = 20, exclude_card_ids: List[str] = None) -> List[dict]:
         """获取真正到期的复习卡片（state != NEW 且 due <= now）
         
         关键：只返回已经学习过、现在到期的卡片，不包括新卡片。
+        exclude_card_ids: 排除的卡片ID列表（避免重复推荐刚复习的卡片）
         """
         now = time.time()
         conn = self._get_conn()
-        rows = conn.execute(
-            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ORDER BY due ASC LIMIT ?",
-            (card_type, user_id, now, limit)
-        ).fetchall()
+        
+        query = ("SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+                 "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ")
+        params = [card_type, user_id, now]
+        
+        if exclude_card_ids:
+            placeholders = ','.join(['?'] * len(exclude_card_ids))
+            query += f"AND card_id NOT IN ({placeholders}) "
+            params.extend(exclude_card_ids)
+        
+        query += "ORDER BY due ASC LIMIT ?"
+        params.append(limit)
+        
+        rows = conn.execute(query, tuple(params)).fetchall()
         conn.close()
 
         result = []
@@ -1347,22 +1357,31 @@ class FSRSDatabase:
         return count
 
     def get_review_queue(self, card_type: str = "sentence", user_id: str = "default",
-                         new_per_day: int = 5, review_limit: int = 50) -> List[dict]:
+                         new_per_day: int = 5, review_limit: int = 50, exclude_card_ids: List[str] = None) -> List[dict]:
         """获取复习队列：混合到期复习卡片和新卡片
         策略：先返回到期复习卡片，再补新卡片
         
         关键：到期复习 = state != 0 且 due <= now 且 due > 0
         新卡片 = state == 0
+        exclude_card_ids: 排除的卡片ID列表（避免重复推荐刚复习的卡片）
         """
         now = time.time()
         conn = self._get_conn()
 
         # 到期的复习卡片（真正学过且到期了）
-        review_rows = conn.execute(
-            "SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
-            "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ORDER BY due ASC LIMIT ?",
-            (card_type, user_id, now, review_limit)
-        ).fetchall()
+        review_query = ("SELECT card_id, state, due, scheduled_days, reps, difficulty, stability "
+                        "FROM cards WHERE card_type=? AND user_id=? AND state != 0 AND due <= ? AND due > 0 ")
+        review_params = [card_type, user_id, now]
+        
+        if exclude_card_ids:
+            placeholders = ','.join(['?'] * len(exclude_card_ids))
+            review_query += f"AND card_id NOT IN ({placeholders}) "
+            review_params.extend(exclude_card_ids)
+        
+        review_query += "ORDER BY due ASC LIMIT ?"
+        review_params.append(review_limit)
+        
+        review_rows = conn.execute(review_query, tuple(review_params)).fetchall()
 
         # 新卡片
         new_rows = conn.execute(
