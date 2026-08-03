@@ -165,6 +165,21 @@ class Settings(BaseSettings):
     # ---------- 校准 ----------
     calibration_dataset_dir: str = str(_PROJECT_ROOT / "bench" / "calibration_set")
 
+    # ---------- LLM 评分 ----------
+    # 默认 ModelScope 云端（用户需配置 API key）
+    llm_api_key: str = Field(default="", description="ModelScope API key 或 OpenAI 兼容 key")
+    llm_base_url: str = Field(
+        default="https://api-inference.modelscope.cn/v1",
+        description="OpenAI 兼容 API base URL",
+    )
+    llm_model: str = Field(
+        default="Qwen/Qwen3.5-122B-A10B",
+        description="LLM 模型名（ModelScope Qwen / 本地 llama.cpp）",
+    )
+    # llama.cpp 本地可选
+    llama_cpp_url: str = Field(default="http://127.0.0.1:8080/v1", description="本地 llama.cpp server URL")
+    llm_enabled: bool = Field(default=True, description="是否启用 LLM 评分")
+
     # ---------- 健康检查 ----------
     health_check_db: bool = True
     health_check_disk: bool = True
@@ -191,17 +206,27 @@ class Settings(BaseSettings):
     def effective_huper_model_path(self) -> str:
         """返回实际使用的 HuPER 模型路径（含环境变量与自动查找）。"""
         env_path = os.environ.get("HUPER_MODEL_PATH", "")
-        if env_path and os.path.isfile(env_path):
-            return env_path
-        if self.huper_model_path and os.path.isfile(self.huper_model_path):
-            return self.huper_model_path
+        if env_path:
+            # 支持相对路径（相对于项目根）
+            p = Path(env_path)
+            if not p.is_absolute():
+                p = _PROJECT_ROOT / p
+            if p.is_file():
+                return str(p)
+        if self.huper_model_path:
+            p = Path(self.huper_model_path)
+            if not p.is_absolute():
+                p = _PROJECT_ROOT / p
+            if p.is_file():
+                return str(p)
 
         # 兼容旧查找路径
         candidates = [
-            Path(self.models_dir) / "model.onnx",
-            Path(self.models_dir) / "model_quantized.onnx",
-            Path(self.models_dir) / "huper" / "model.onnx",
-            Path(self.models_dir) / "huper" / "model_quantized.onnx",
+            _PROJECT_ROOT / self.models_dir / "huper_onnx_int8_dynamic" / "model_quantized.onnx",
+            _PROJECT_ROOT / self.models_dir / "model.onnx",
+            _PROJECT_ROOT / self.models_dir / "model_quantized.onnx",
+            _PROJECT_ROOT / self.models_dir / "huper" / "model.onnx",
+            _PROJECT_ROOT / self.models_dir / "huper" / "model_quantized.onnx",
             _BACKEND_DIR / "models" / "model.onnx",
             _BACKEND_DIR / "models" / "model_quantized.onnx",
             _PROJECT_ROOT / "huper_onnx" / "model.onnx",

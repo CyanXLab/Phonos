@@ -32,6 +32,7 @@ from .api import (
     dictation_v2,
     evaluate_v2,
     health,
+    llm,
     models,
     shanghai_exam,
 )
@@ -159,6 +160,7 @@ def create_app() -> FastAPI:
     app.include_router(models.router)
     app.include_router(data.router)
     app.include_router(config_center.router)
+    app.include_router(llm.router)
 
     # 兼容：注册旧版路由（直接 import 原 main.py 的 app）
     try:

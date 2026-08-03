@@ -21,6 +21,20 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
+# v3.2: 启动时加载 .env 到环境变量（在所有 import 之前）
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_env_file = _PROJECT_ROOT / ".env"
+if _env_file.exists():
+    with open(_env_file, "r", encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _, _v = _line.partition("=")
+                _k = _k.strip()
+                _v = _v.strip()
+                if _k:
+                    os.environ.setdefault(_k, _v)
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -3620,6 +3634,7 @@ try:
     from app.api import models as _models_v2
     from app.api import data as _data_v2
     from app.api import config_center as _config_center
+    from app.api import llm as _llm
 
     app.include_router(_health_v2.router)
     app.include_router(_evaluate_v2.router)
@@ -3628,7 +3643,8 @@ try:
     app.include_router(_models_v2.router)
     app.include_router(_data_v2.router)
     app.include_router(_config_center.router)
-    print("[v3] 新模块路由已注册：/api/v2/*, /api/shanghai-exam/*, /api/models/*, /api/data/*, /api/config/*, /api/health/v2")
+    app.include_router(_llm.router)
+    print("[v3] 新模块路由已注册：/api/v2/*, /api/shanghai-exam/*, /api/models/*, /api/data/*, /api/config/*, /api/llm/*, /api/health/v2")
 except Exception as e:
     print(f"[v3] 新模块注册失败（不影响旧功能）: {e}")
 

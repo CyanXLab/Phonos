@@ -64,7 +64,7 @@ export const dictationApi = {
 export const shanghaiExamApi = {
   taskTypes: () => api.get("/shanghai-exam/task-types"),
   tasks: (params?: Record<string, any>) => api.get("/shanghai-exam/tasks", { params }),
-  createSession: (data: { mode: string; task_count?: number; task_types?: string[] }) =>
+  createSession: (data: { mode: string; task_count?: number; task_types?: string[]; full_exam?: boolean }) =>
     api.post("/shanghai-exam/sessions", data),
   getSession: (id: string) => api.get(`/shanghai-exam/sessions/${id}`),
   submit: (sessionId: string, taskId: string, response: any) =>
@@ -72,6 +72,12 @@ export const shanghaiExamApi = {
   finish: (sessionId: string) => api.post(`/shanghai-exam/sessions/${sessionId}/finish`),
   report: (sessionId: string) => api.get(`/shanghai-exam/sessions/${sessionId}/report`),
   disclaimer: () => api.get("/shanghai-exam/disclaimer"),
+  structure: () => api.get("/shanghai-exam/structure"),
+};
+
+export const llmApi = {
+  health: () => api.get("/llm/health"),
+  score: (data: any) => api.post("/llm/score", data),
 };
 
 export const modelsApi = {

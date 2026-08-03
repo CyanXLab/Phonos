@@ -1,4 +1,4 @@
-"""本地 HuPER Provider：包装原 onnx_service，扩展置信度、音质检测。"""
+"""本地 HuPER Provider：包装原 onnx_service，扩展置信度、音质检测、IPA→ARPAbet 转换。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import numpy as np
 
 from ..core.config import get_settings
 from ..core.logging import get_logger
+from .ipa_mapping import ipa_to_arpabet
 from .pronunciation_provider import (
     AudioQualityReport,
     ModelMode,
@@ -87,17 +88,19 @@ class LocalHuPERProvider(PronunciationProvider):
 
         # 2. 推理（含 softmax 置信度）
         result = self._recognizer.recognize_with_confidence(audio, sample_rate)
-        # result: {phonemes, timeline, blank_segments, total_duration, frame_confidences}
-        phonemes = result["phonemes"]
+        ipa_phonemes = result["phonemes"]  # IPA 音素列表
         timeline = result["timeline"]
         frame_confidences = result.get("frame_confidences", [])
 
-        # 3. forced alignment：将 expected 与 actual 对齐并分配时间戳
+        # 3. IPA → ARPAbet 转换（兼容原评分逻辑）
+        arpabet_phonemes = ipa_to_arpabet(ipa_phonemes)
+
+        # 4. forced alignment：将 expected 与 actual 对齐并分配时间戳
         phone_segments = _align_with_timestamps(
-            expected_phonemes, phonemes, timeline, frame_confidences
+            expected_phonemes, arpabet_phonemes, timeline, frame_confidences
         )
 
-        # 4. word-level 时间戳（基于 word_boundaries 与对齐结果）
+        # 5. word-level 时间戳
         words = _build_word_segments(word_boundaries or [], phone_segments)
 
         inference_ms = (time.perf_counter() - t0) * 1000
@@ -107,14 +110,19 @@ class LocalHuPERProvider(PronunciationProvider):
             phonemes=phone_segments,
             words=words,
             audio_quality=quality,
-            raw_phonemes=phonemes,
+            raw_phonemes=arpabet_phonemes,
             timeline=timeline,
             blank_segments=result["blank_segments"],
             total_duration=result["total_duration"],
             inference_ms=inference_ms,
-            model_name=f"huper_onnx ({mode.value})",
+            model_name=f"wav2vec2-xls-r-300m-timit-phoneme INT8 ({mode.value})",
             mode=mode,
-            extra={"sample_rate": sample_rate, "num_frames": result.get("num_frames", 0)},
+            extra={
+                "sample_rate": sample_rate,
+                "num_frames": result.get("num_frames", 0),
+                "ipa_phonemes": ipa_phonemes,
+                "arpabet_phonemes": arpabet_phonemes,
+            },
         )
 
 
