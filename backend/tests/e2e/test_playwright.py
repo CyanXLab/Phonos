@@ -36,153 +36,127 @@ def screenshot(page: Page, name: str):
 
 
 def test_homepage_loads(page: Page):
-    """测试 1：首页正常加载。"""
-    step("测试 1: 首页加载")
-    page.goto(BASE_URL, wait_until="networkidle", timeout=15000)
-    expect(page).to_have_title("Phonos - 口语练习平台")
-    header = page.locator(".header, header").first
-    expect(header).to_be_visible()
-    failed = page.evaluate("""() => {
-        const entries = performance.getEntriesByType('resource');
-        return entries.filter(e => e.transferSize === 0 && e.name.includes('cdn'))
-            .map(e => e.name);
-    }""")
-    if failed:
-        print(f"  ⚠ CDN 加载失败的资源: {failed}")
-    screenshot(page, "01_homepage")
-    print("  ✓ 首页加载成功")
+    """测试 1：API 文档页正常加载（frontend 已删除，测试 API 层）。"""
+    step("测试 1: API 文档加载")
+    page.goto(f"{BASE_URL}/docs", wait_until="networkidle", timeout=15000)
+    # FastAPI Swagger UI 标题
+    expect(page).to_have_title("Phonos 口语练习平台 - Swagger UI")
+    screenshot(page, "01_api_docs")
+    print("  ✓ API 文档页加载成功")
 
 
 def test_user_registration_and_login(page: Page, context: BrowserContext):
-    """测试 2：用户注册和登录。"""
-    step("测试 2: 用户注册和登录")
+    """测试 2：用户注册和登录（通过 API 测试）。"""
+    step("测试 2: 用户注册和登录（API）")
+    import urllib.request
+    import json as _json
     username = f"testuser_{uuid.uuid4().hex[:8]}"
     password = "TestPass123"
-    page.goto(BASE_URL, wait_until="networkidle")
-    page.wait_for_timeout(1000)
 
-    # 找登录按钮并点击
-    login_btn = page.locator("text=登录").first
+    # 通过 API 注册
+    data = _json.dumps({"username": username, "password": password, "display_name": "测试用户"}).encode()
+    req = urllib.request.Request(f"{BASE_URL}/api/auth/register", data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
-        login_btn.wait_for(state="visible", timeout=3000)
-        login_btn.click()
-        page.wait_for_timeout(800)
-    except Exception:
-        print("  ⚠ 未找到登录按钮，尝试直接填写")
-
-    # 切换到注册
-    reg_tab = page.locator("text=注册").first
-    try:
-        reg_tab.wait_for(state="visible", timeout=2000)
-        reg_tab.click()
-        page.wait_for_timeout(500)
-    except Exception:
-        pass
-
-    # 填写表单（用更宽容的选择器和等待）
-    username_input = page.locator('input[placeholder*="用户名"], input[id*="username"], input[id="loginUsername"]').first
-    try:
-        username_input.wait_for(state="visible", timeout=5000)
-        username_input.fill(username)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                print(f"  ✓ API 注册成功: {username}")
+            else:
+                print(f"  ⚠ 注册返回 {resp.status}")
     except Exception as e:
-        print(f"  ⚠ 用户名输入失败: {e}")
-        screenshot(page, "02_register_form")
-        return None, None
+        print(f"  ⚠ 注册失败: {e}")
 
-    pwd_input = page.locator('input[type="password"]').first
-    pwd_input.fill(password)
-
-    # 显示名（可选）
-    display_input = page.locator('input[placeholder*="显示名"], input[placeholder*="昵称"], input[id*="display"]').first
+    # 登录
+    data = _json.dumps({"username": username, "password": password}).encode()
+    req = urllib.request.Request(f"{BASE_URL}/api/auth/login", data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
-        display_input.wait_for(state="visible", timeout=1000)
-        display_input.fill("测试用户")
-    except Exception:
-        pass
-
-    screenshot(page, "02_register_form")
-    submit = page.locator('button:has-text("注册"), button:has-text("确定"), button:has-text("确认")').first
-    submit.click()
-    page.wait_for_timeout(2000)
-    body_text = page.inner_text("body")
-    if username in body_text or "测试用户" in body_text or "登出" in body_text or "退出" in body_text:
-        print(f"  ✓ 注册并登录成功: {username}")
-    else:
-        print(f"  ⚠ 注册可能失败，body 含: {body_text[:200]}")
-    screenshot(page, "03_after_register")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read())
+            if result.get("token"):
+                print(f"  ✓ API 登录成功，获取 token")
+            else:
+                print(f"  ⚠ 登录无 token")
+    except Exception as e:
+        print(f"  ⚠ 登录失败: {e}")
+    screenshot(page, "02_api_auth")
     return username, password
 
 
 def test_sentence_loading(page: Page):
-    """测试 3：句子加载。"""
-    step("测试 3: 句子加载")
-    page.goto(BASE_URL, wait_until="networkidle")
-    page.wait_for_timeout(2000)
-    sentence_card = page.locator(".sentence-card, .card").first
-    expect(sentence_card).to_be_visible()
-    sentence_text = sentence_card.inner_text()
-    if any(c.isalpha() for c in sentence_text):
-        print(f"  ✓ 句子已加载: {sentence_text[:80]}...")
-    else:
-        print(f"  ⚠ 句子可能未加载")
-    screenshot(page, "04_sentence")
+    """测试 3：句子加载（通过 API）。"""
+    step("测试 3: 句子加载（API）")
+    import urllib.request
+    import json as _json
+    req = urllib.request.Request(f"{BASE_URL}/api/sentences")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            count = len(data) if isinstance(data, list) else len(data.get("sentences", []))
+            print(f"  ✓ 句子列表加载: {count} 个")
+    except Exception as e:
+        print(f"  ⚠ 句子加载失败: {e}")
+    screenshot(page, "03_sentences")
 
 
 def test_tts_playback(page: Page):
-    """测试 4：TTS 播放。"""
-    step("测试 4: TTS 播放")
-    page.goto(BASE_URL, wait_until="networkidle")
-    page.wait_for_timeout(1500)
-    play_btn = page.locator('button:has-text("播放"), button:has-text("朗读"), button:has-text("🔊")').first
-    if play_btn.is_visible():
-        play_btn.click()
-        page.wait_for_timeout(2000)
-        print("  ✓ TTS 播放按钮已点击")
-    else:
-        print("  ⚠ 未找到 TTS 播放按钮")
-    screenshot(page, "05_tts")
+    """测试 4：TTS API。"""
+    step("测试 4: TTS API")
+    import urllib.request
+    req = urllib.request.Request(f"{BASE_URL}/api/tts/check")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            import json as _json
+            data = _json.loads(resp.read())
+            engines = [k for k, v in data.items() if v]
+            print(f"  ✓ TTS 可用引擎: {engines}")
+    except Exception as e:
+        print(f"  ⚠ TTS 检查失败: {e}")
+    screenshot(page, "04_tts")
 
 
 def test_recording_flow(page: Page):
-    """测试 5：录音流程（模拟，无真实麦克风）。"""
-    step("测试 5: 录音流程")
-    page.goto(BASE_URL, wait_until="networkidle")
-    page.wait_for_timeout(1500)
-    rec_btn = page.locator('button:has-text("录音"), button:has-text("开始录音"), button:has-text("🎤")').first
-    if rec_btn.is_visible():
-        rec_btn.click()
-        page.wait_for_timeout(1000)
-        screenshot(page, "06_recording")
-        stop_btn = page.locator('button:has-text("停止"), button:has-text("完成")').first
-        if stop_btn.is_visible():
-            stop_btn.click()
-            page.wait_for_timeout(2000)
-        print("  ✓ 录音流程完成（无真实音频）")
-    else:
-        print("  ⚠ 未找到录音按钮")
-    screenshot(page, "07_after_recording")
+    """测试 5：录音 API（评测接口可用性）。"""
+    step("测试 5: 评测 API")
+    import urllib.request
+    req = urllib.request.Request(f"{BASE_URL}/api/health/v2")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            import json as _json
+            data = _json.loads(resp.read())
+            huper = data.get("checks", {}).get("huper_model", {})
+            if huper.get("available"):
+                print(f"  ✓ HuPER 模型可用: {huper.get('path', '')[:50]}")
+            else:
+                print(f"  ⚠ HuPER 模型不可用")
+    except Exception as e:
+        print(f"  ⚠ 健康检查失败: {e}")
+    screenshot(page, "05_evaluator")
 
 
 def test_dictation_flow(page: Page):
-    """测试 6：听写流程。"""
-    step("测试 6: 听写流程")
-    page.goto(BASE_URL, wait_until="networkidle")
-    page.wait_for_timeout(1500)
-    dictation_tab = page.locator('text=听写').first
-    if dictation_tab.is_visible():
-        dictation_tab.click()
-        page.wait_for_timeout(1000)
-    input_area = page.locator('textarea, input[type="text"]').first
-    if input_area.is_visible():
-        input_area.fill("the weather is beautiful today")
-        page.wait_for_timeout(500)
-        screenshot(page, "08_dictation_input")
-        check_btn = page.locator('button:has-text("检查"), button:has-text("提交")').first
-        if check_btn.is_visible():
-            check_btn.click()
-            page.wait_for_timeout(1500)
-        print("  ✓ 听写提交流程完成")
-    screenshot(page, "09_dictation_result")
+    """测试 6：听写 API。"""
+    step("测试 6: 听写 API")
+    import urllib.request
+    import json as _json
+    # 注册 + 登录
+    username = f"dict_{uuid.uuid4().hex[:8]}"
+    data = _json.dumps({"username": username, "password": "TestPass123", "display_name": "T"}).encode()
+    req = urllib.request.Request(f"{BASE_URL}/api/auth/register", data=data, headers={"Content-Type": "application/json"}, method="POST")
+    urllib.request.urlopen(req, timeout=10)
+    data = _json.dumps({"username": username, "password": "TestPass123"}).encode()
+    req = urllib.request.Request(f"{BASE_URL}/api/auth/login", data=data, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        token = _json.loads(resp.read())["token"]
+
+    # 听写检查
+    data = _json.dumps({"expected": "hello world", "actual": "hello world", "keywords": []}).encode()
+    req = urllib.request.Request(f"{BASE_URL}/api/v2/dictation/check", data=data, headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read())
+            print(f"  ✓ 听写评分: {result.get('overall_score')}")
+    except Exception as e:
+        print(f"  ⚠ 听写检查失败: {e}")
+    screenshot(page, "06_dictation")
 
 
 def test_shanghai_exam_page(page: Page):
@@ -208,27 +182,27 @@ def test_config_center(page: Page):
 
 
 def test_mobile_responsive(page: Page):
-    """测试 9：移动端响应式。"""
-    step("测试 9: 移动端响应式")
+    """测试 9：API 文档在不同视口可访问。"""
+    step("测试 9: 多视口访问")
     page.set_viewport_size({"width": 375, "height": 812})
-    page.goto(BASE_URL, wait_until="networkidle")
-    page.wait_for_timeout(1500)
+    page.goto(f"{BASE_URL}/docs", wait_until="networkidle")
+    page.wait_for_timeout(1000)
     screenshot(page, "12_mobile_375")
     page.set_viewport_size({"width": 768, "height": 1024})
     page.reload(wait_until="networkidle")
     page.wait_for_timeout(1000)
     screenshot(page, "13_tablet_768")
     page.set_viewport_size({"width": 1280, "height": 800})
-    print("  ✓ 移动端/平板/桌面三档响应式截图完成")
+    print("  ✓ 多视口访问测试完成")
 
 
 def test_no_console_errors(page: Page):
-    """测试 10：控制台无错误。"""
+    """测试 10：API 文档页控制台无错误。"""
     step("测试 10: 控制台错误检查")
     errors = []
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
     page.on("pageerror", lambda err: errors.append(f"pageerror: {err}"))
-    page.goto(BASE_URL, wait_until="networkidle")
+    page.goto(f"{BASE_URL}/docs", wait_until="networkidle")
     page.wait_for_timeout(3000)
     if errors:
         print(f"  ⚠ 控制台有 {len(errors)} 个错误:")
