@@ -1,0 +1,61 @@
+# ============================================================
+# Phonos v3 docker-compose
+# ============================================================
+# 一键启动：docker compose up -d
+# 含模型下载：docker compose run --rm phonos python backend/scripts/download_models.py
+# ============================================================
+
+services:
+  phonos:
+    build: .
+    container_name: phonos
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./backend/phonos_fsrs.db:/app/backend/phonos_fsrs.db
+      - ./backend/phonos_learning.db:/app/backend/phonos_learning.db
+      - ./backend/phonos_auth.db:/app/backend/phonos_auth.db
+      - ./backend/phonos_metacognition.db:/app/backend/phonos_metacognition.db
+      - ./backend/phonos_semantic.db:/app/backend/phonos_semantic.db
+      - ./backend/shanghai_corpus:/app/backend/shanghai_corpus
+    env_file:
+      - .env
+    environment:
+      - ENV=prod
+      - LOG_FORMAT=json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # 可选：PostgreSQL（多用户/学校版）
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: phonos-postgres
+  #   environment:
+  #     POSTGRES_DB: phonos
+  #     POSTGRES_USER: phonos
+  #     POSTGRES_PASSWORD: change-me
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+  # 可选：Nginx 反向代理（生产）
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: phonos-nginx
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #   depends_on:
+  #     - phonos
+
+# volumes:
+#   pgdata:

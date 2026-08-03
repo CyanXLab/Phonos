@@ -1,0 +1,197 @@
+[
+  {
+    "id": "sr_001",
+    "type": "sentence_reading",
+    "title": "句子朗读 - 日常生活",
+    "prompt": "Please read the following sentence aloud.",
+    "expected_answer": "The weather is beautiful today, so I decide to go for a walk in the park.",
+    "keywords": [
+      "weather",
+      "beautiful",
+      "park"
+    ],
+    "difficulty": "easy",
+    "topic": "daily_life",
+    "cefr": "A2",
+    "textbook_source": "上海七年级英语",
+    "skill_tags": [
+      "pronunciation",
+      "intonation"
+    ],
+    "phoneme_coverage": [
+      "TH",
+      "DH",
+      "ER",
+      "AE"
+    ]
+  },
+  {
+    "id": "wr_001",
+    "type": "word_reading",
+    "title": "单词朗读 - 高频词",
+    "prompt": "Please read the following words aloud.",
+    "expected_answer": "beautiful environment technology experience pronunciation",
+    "difficulty": "medium",
+    "topic": "vocabulary",
+    "cefr": "B1",
+    "skill_tags": [
+      "pronunciation"
+    ],
+    "phoneme_coverage": [
+      "B",
+      "F",
+      "V",
+      "TH"
+    ]
+  },
+  {
+    "id": "dt_001",
+    "type": "dictation",
+    "title": "听写 - 校园生活",
+    "prompt": "Listen carefully and write down what you hear.",
+    "expected_answer": "My classmates and I are preparing for the English speech contest next week.",
+    "keywords": [
+      "classmates",
+      "preparing",
+      "speech",
+      "contest"
+    ],
+    "difficulty": "medium",
+    "topic": "school_life",
+    "cefr": "B1",
+    "skill_tags": [
+      "listening",
+      "spelling"
+    ]
+  },
+  {
+    "id": "lc_001",
+    "type": "listening_choice",
+    "title": "听句子选择",
+    "prompt": "Listen and choose the best response.",
+    "options": [
+      "I'm fine, thank you.",
+      "How do you do?",
+      "Nice to meet you.",
+      "See you later."
+    ],
+    "correct_option": 1,
+    "expected_answer": "How do you do?",
+    "difficulty": "easy",
+    "topic": "greeting",
+    "cefr": "A2",
+    "skill_tags": [
+      "listening",
+      "comprehension"
+    ]
+  },
+  {
+    "id": "qa_001",
+    "type": "question_answer",
+    "title": "听问题回答",
+    "prompt": "Listen to the question and give your answer.",
+    "expected_answer": "I usually get up at six thirty in the morning.",
+    "keywords": [
+      "six",
+      "thirty",
+      "morning"
+    ],
+    "difficulty": "medium",
+    "topic": "daily_routine",
+    "cefr": "A2",
+    "skill_tags": [
+      "listening",
+      "speaking",
+      "grammar"
+    ]
+  },
+  {
+    "id": "ic_001",
+    "type": "information_completion",
+    "title": "信息补全",
+    "prompt": "Listen to the dialogue and complete the notes.",
+    "expected_answer": "The meeting will be held in Room 302 at 3 p.m. on Friday.",
+    "keywords": [
+      "Room 302",
+      "3 p.m.",
+      "Friday"
+    ],
+    "difficulty": "hard",
+    "topic": "school_activity",
+    "cefr": "B1",
+    "skill_tags": [
+      "listening",
+      "note_taking"
+    ]
+  },
+  {
+    "id": "ir_001",
+    "type": "information_retelling",
+    "title": "信息转述",
+    "prompt": "Listen to the story and retell it in your own words.",
+    "expected_answer": "Last Sunday, Tom went to the library to borrow some books about history. He spent two hours there and finally found three books he needed for his research paper.",
+    "keywords": [
+      "Sunday",
+      "library",
+      "history",
+      "two hours",
+      "three books"
+    ],
+    "difficulty": "hard",
+    "topic": "narrative",
+    "cefr": "B1",
+    "skill_tags": [
+      "listening",
+      "speaking",
+      "summary"
+    ]
+  },
+  {
+    "id": "sr_002",
+    "type": "situational_response",
+    "title": "情景应答",
+    "prompt": "Situation: Your friend invites you to a birthday party but you have an exam the next day. Respond appropriately.",
+    "expected_answer": "Thank you for the invitation, but I'm afraid I can't come because I have an important exam tomorrow. Maybe we can celebrate together this weekend.",
+    "keywords": [
+      "thank",
+      "exam",
+      "weekend"
+    ],
+    "difficulty": "hard",
+    "topic": "social_interaction",
+    "cefr": "B1",
+    "skill_tags": [
+      "speaking",
+      "communication",
+      "grammar"
+    ]
+  },
+  {
+    "id": "pd_001",
+    "type": "picture_description",
+    "title": "看图说话",
+    "prompt": "Look at the pictures and tell a story.",
+    "image_urls": [
+      "picture_001_a.jpg",
+      "picture_001_b.jpg",
+      "picture_001_c.jpg"
+    ],
+    "expected_answer": "One morning, a boy was walking to school when he saw an old lady dropping her groceries. He helped her pick up the things and she thanked him. The boy felt happy and continued to school.",
+    "keywords": [
+      "morning",
+      "walking",
+      "school",
+      "old lady",
+      "helped",
+      "happy"
+    ],
+    "difficulty": "hard",
+    "topic": "narrative",
+    "cefr": "B1",
+    "skill_tags": [
+      "speaking",
+      "narrative",
+      "vocabulary"
+    ]
+  }
+]
