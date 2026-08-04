@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { shanghaiExamApi } from "../api";
+import { shanghaiExamApi, api } from "../api";
 import { ExamTimer } from "../components/ExamTimer";
 import { useRecorder } from "../hooks/useRecorder";
 import { Waveform } from "../components/Waveform";
@@ -14,6 +14,11 @@ export function ShanghaiExamPage() {
   const { data: structure } = useQuery({
     queryKey: ["exam-structure"],
     queryFn: () => shanghaiExamApi.taskTypes().then((r) => r.data),
+  });
+
+  const { data: yearsData } = useQuery({
+    queryKey: ["exam-years"],
+    queryFn: () => api.get("/shanghai-exam/years").then((r) => r.data),
   });
 
   const { data: session } = useQuery({
@@ -36,6 +41,17 @@ export function ShanghaiExamPage() {
   const createPractice = useMutation({
     mutationFn: (mode: "practice" | "exam") =>
       shanghaiExamApi.createSession({ mode, full_exam: false, task_count: 5 }).then((r) => r.data),
+    onSuccess: (data) => {
+      setSessionId(data.session_id);
+      setCurrentTaskIdx(0);
+      setPhase("prep");
+      setReport(null);
+    },
+  });
+
+  const createByYear = useMutation({
+    mutationFn: ({ year, mode }: { year: string; mode: "practice" | "exam" }) =>
+      shanghaiExamApi.createSession({ mode, year }).then((r) => r.data),
     onSuccess: (data) => {
       setSessionId(data.session_id);
       setCurrentTaskIdx(0);
@@ -101,23 +117,45 @@ export function ShanghaiExamPage() {
         )}
 
         {!sessionId && (
-          <div className="space-y-3">
-            <p className="text-sm text-gray-600 dark:text-gray-300">选择模式开始训练：</p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => createFullExam.mutate("exam")}
-                disabled={createFullExam.isPending}
-                className="btn-primary"
-              >
-                {createFullExam.isPending ? "创建中..." : "完整套卷（35 分，模拟高考）"}
-              </button>
-              <button
-                onClick={() => createPractice.mutate("practice")}
-                disabled={createPractice.isPending}
-                className="btn-secondary"
-              >
-                {createPractice.isPending ? "创建中..." : "练习模式（5 题，按题型）"}
-              </button>
+          <div className="space-y-4">
+            <div>
+              <p className="text-sm font-medium mb-2">按套卷训练（真题）：</p>
+              {yearsData?.years?.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {yearsData.years.map((y: string) => (
+                    <button
+                      key={y}
+                      onClick={() => createByYear.mutate({ year: y, mode: "exam" })}
+                      disabled={createByYear.isPending}
+                      className="px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 text-sm"
+                    >
+                      {y} <span className="text-xs text-gray-400">({yearsData.stats[y]?.count || 0}题)</span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-400">加载中...</p>
+              )}
+            </div>
+
+            <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+              <p className="text-sm font-medium mb-2">其他模式：</p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => createFullExam.mutate("exam")}
+                  disabled={createFullExam.isPending}
+                  className="btn-primary"
+                >
+                  {createFullExam.isPending ? "创建中..." : "完整套卷（35 分，模拟高考）"}
+                </button>
+                <button
+                  onClick={() => createPractice.mutate("practice")}
+                  disabled={createPractice.isPending}
+                  className="btn-secondary"
+                >
+                  {createPractice.isPending ? "创建中..." : "练习模式（5 题，按题型）"}
+                </button>
+              </div>
             </div>
           </div>
         )}

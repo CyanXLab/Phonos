@@ -28,6 +28,7 @@ class CreateSessionRequest(BaseModel):
     task_types: Optional[List[str]] = None
     task_count: int = 5
     full_exam: bool = Field(default=False, description="创建完整高考套卷（35分）")
+    year: Optional[str] = Field(default=None, description="按年份/套卷创建（如 2025一模、2026秋考）")
 
 
 class SubmitResponseRequest(BaseModel):
@@ -88,7 +89,9 @@ async def create_session(
     except ValueError:
         raise HTTPException(400, f"invalid mode: {req.mode}")
 
-    if req.full_exam:
+    if req.year:
+        session = service.create_exam_by_year(user["id"], req.year, mode)
+    elif req.full_exam:
         session = service.create_full_exam(user["id"], mode)
     else:
         task_types = None
@@ -199,6 +202,23 @@ async def get_report(session_id: str, user: dict = Depends(require_user)):
 async def get_disclaimer():
     """获取合规声明。"""
     return {"disclaimer": DISCLAIMER}
+
+
+@router.get("/years")
+async def list_years(user: dict = Depends(require_user)):
+    """列出所有可用年份/套卷。"""
+    service = get_shanghai_exam_service()
+    years = service.list_years()
+    # 统计每个年份的题数
+    year_stats = {}
+    for y in years:
+        tasks = [t for t in service._corpus if y in t.year]
+        year_stats[y] = {
+            "count": len(tasks),
+            "listening": len([t for t in tasks if t.section == "listening"]),
+            "speaking": len([t for t in tasks if t.section == "speaking"]),
+        }
+    return {"years": years, "stats": year_stats}
 
 
 @router.get("/structure")

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "pd_2025_chun_01",
+    "type": "picture_description",
+    "section": "speaking",
+    "title": "2025春考 看图说话 - 助人",
+    "prompt": "看图说话：根据以下图片，讲述一个完整的故事。",
+    "image_urls": ["picture_pd_001_a.jpg", "picture_pd_001_b.jpg", "picture_pd_001_c.jpg"],
+    "expected_answer": "One morning, a boy was walking to school when he saw an old lady dropping her groceries. He helped her pick up the things and she thanked him. The boy felt happy and continued to school.",
+    "keywords": ["morning", "walking", "school", "old lady", "helped", "happy"],
+    "topic": "narrative",
+    "cefr": "B1",
+    "year": "2025春考",
+    "source": "candidate_recall",
+    "difficulty": "medium"
+  },
+  {
+    "id": "pd_2026_qiu_01",
+    "type": "picture_description",
+    "section": "speaking",
+    "title": "2026秋考 看图说话 - 给妈妈过生日",
+    "prompt": "看图说话：图片展示了一个家庭为妈妈过生日的故事。请讲述。",
+    "image_urls": ["picture_pd_002_a.jpg", "picture_pd_002_b.jpg"],
+    "expected_answer": "The family prepared a surprise birthday party for their mother. The children decorated the room with balloons and made a cake. When mother came home, everyone shouted 'Happy Birthday!' and she was deeply moved.",
+    "keywords": ["family", "birthday", "surprise", "mother", "party", "cake"],
+    "topic": "family",
+    "cefr": "B1",
+    "year": "2026秋考",
+    "source": "candidate_recall",
+    "difficulty": "hard"
+  },
+  {
+    "id": "pd_yimo2025_01",
+    "type": "picture_description",
+    "section": "speaking",
+    "title": "2025一模 看图说话 - 植树",
+    "prompt": "看图说话：图片展示了学生植树的活动。请讲述。",
+    "image_urls": ["picture_pd_003_a.jpg", "picture_pd_003_b.jpg", "picture_pd_003_c.jpg"],
+    "expected_answer": "Last Saturday, students went to a park to plant trees. They worked in groups, digging holes, planting young trees, and watering them. Although it was tiring, everyone felt proud of contributing to the environment.",
+    "keywords": ["Saturday", "students", "park", "plant trees", "environment", "proud"],
+    "topic": "environment",
+    "cefr": "B1",
+    "year": "2025一模",
+    "source": "candidate_recall",
+    "difficulty": "medium"
+  },
+  {
+    "id": "pd_2026_qiu_02",
+    "type": "picture_description",
+    "section": "speaking",
+    "title": "2026秋考 看图说话 - 抓青蛙",
+    "prompt": "看图说话：图片展示了孩子们在池塘边抓青蛙的故事。请讲述。",
+    "image_urls": ["picture_pd_004_a.jpg", "picture_pd_004_b.jpg"],
+    "expected_answer": "On a sunny afternoon, several children went to a pond to catch frogs. They brought nets and buckets, laughing and chasing the frogs. At the end, they released the frogs back into the pond, learning to respect nature.",
+    "keywords": ["afternoon", "children", "pond", "frogs", "catch", "nature"],
+    "topic": "narrative",
+    "cefr": "B1",
+    "year": "2026秋考",
+    "source": "candidate_recall",
+    "difficulty": "medium"
+  }
+]

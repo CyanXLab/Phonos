@@ -1,0 +1,47 @@
+[
+  {
+    "id": "ra_2025_chun_01",
+    "type": "retell_and_answer",
+    "section": "speaking",
+    "title": "2025春考 简述与回答 - 图书馆借书",
+    "prompt": "听一段材料后，简述内容并回答问题。",
+    "audio_url": "audio/ra_2025_chun_01.mp3",
+    "expected_answer": "Last Sunday, Tom went to the library to borrow some books about history. He spent two hours there and finally found three books he needed for his research paper. After that, he went to a café to review the books.",
+    "keywords": ["Sunday", "library", "history", "two hours", "three books", "research"],
+    "topic": "narrative",
+    "cefr": "B1",
+    "year": "2025春考",
+    "source": "candidate_recall",
+    "difficulty": "hard"
+  },
+  {
+    "id": "ra_2026_qiu_01",
+    "type": "retell_and_answer",
+    "section": "speaking",
+    "title": "2026秋考 简述与回答 - 志愿活动",
+    "prompt": "听一段材料后，简述内容并回答问题。",
+    "audio_url": "audio/ra_2026_qiu_01.mp3",
+    "expected_answer": "Last summer, a group of high school students volunteered at a local nursing home. They spent two weeks helping the elderly with daily activities, chatting with them, and organizing performances. The experience taught them the value of patience and respect.",
+    "keywords": ["summer", "students", "volunteer", "nursing home", "elderly", "patience"],
+    "topic": "society",
+    "cefr": "B2",
+    "year": "2026秋考",
+    "source": "candidate_recall",
+    "difficulty": "hard"
+  },
+  {
+    "id": "ra_yimo2025_01",
+    "type": "retell_and_answer",
+    "section": "speaking",
+    "title": "2025一模 简述与回答 - 旅行经历",
+    "prompt": "听一段材料后，简述内容并回答问题。",
+    "audio_url": "audio/ra_yimo2025_01.mp3",
+    "expected_answer": "During the National Day holiday, Li Hua traveled to Beijing with her family. They visited the Great Wall, the Forbidden City, and tasted famous Peking duck. Although the trip was exhausting, they all enjoyed it very much and took many photos.",
+    "keywords": ["holiday", "Li Hua", "Beijing", "Great Wall", "family", "photos"],
+    "topic": "travel",
+    "cefr": "B1",
+    "year": "2025一模",
+    "source": "candidate_recall",
+    "difficulty": "hard"
+  }
+]

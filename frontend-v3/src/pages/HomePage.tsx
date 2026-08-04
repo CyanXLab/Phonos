@@ -11,18 +11,33 @@ export function HomePage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <FeatureCard
           title="发音评测 v2"
-          desc="9 维评分：音素准确度/完整度/流利度/韵律/重音/语调/停顿/语速/音质"
+          desc="9 维评分 + AI 发音诊断 + 改进建议"
           to="/practice"
         />
         <FeatureCard
           title="听写训练 v2"
-          desc="词级对齐 + 拼写容错 + 音近词 + 关键词权重 + 语法变形识别"
+          desc="词级对齐 + AI 错因分析 + 语义判断"
           to="/dictation"
         />
         <FeatureCard
           title="上海听说考试"
-          desc="9 种任务类型：朗读/听写/听答/信息转述/情景应答/看图说话/模拟套卷"
+          desc="35 分 8 题型（一模/二模/春考/秋考真题）+ AI 批改解析"
           to="/shanghai-exam"
+        />
+        <FeatureCard
+          title="AI 学习诊断"
+          desc="LLM 分析错误模式 + 弱项 + 提分路径 + 优先行动"
+          to="/diagnosis"
+        />
+        <FeatureCard
+          title="AI 助手"
+          desc="Qwen3.5-122B 对话，解答发音/语法/备考问题"
+          to="/assistant"
+        />
+        <FeatureCard
+          title="设置中心"
+          desc="模型/LLM/评分/隐私配置，网页可改"
+          to="/settings"
         />
       </div>
 

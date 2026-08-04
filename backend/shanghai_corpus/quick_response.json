@@ -1,0 +1,67 @@
+[
+  {
+    "id": "qr_2025_chun_01",
+    "type": "quick_response",
+    "section": "speaking",
+    "title": "2025春考 快速应答 - 感谢",
+    "prompt": "听到: 'Thank you very much for your help.' 请快速应答。",
+    "expected_answer": "You're welcome. / My pleasure. / Any time.",
+    "topic": "social",
+    "cefr": "A1",
+    "year": "2025春考",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "qr_2025_chun_02",
+    "type": "quick_response",
+    "section": "speaking",
+    "title": "2025春考 快速应答 - 请求",
+    "prompt": "听到: 'Would you mind opening the window?' 请快速应答。",
+    "expected_answer": "Not at all. / Of course not. / Sure, no problem.",
+    "topic": "social",
+    "cefr": "A2",
+    "year": "2025春考",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "qr_2026_qiu_01",
+    "type": "quick_response",
+    "section": "speaking",
+    "title": "2026秋考 快速应答 - 周末",
+    "prompt": "听到: 'How was your weekend?' 请快速应答。",
+    "expected_answer": "It was great. / Pretty good. / I had a wonderful time.",
+    "topic": "social",
+    "cefr": "A2",
+    "year": "2026秋考",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "qr_yimo2025_01",
+    "type": "quick_response",
+    "section": "speaking",
+    "title": "2025一模 快速应答 - 道歉",
+    "prompt": "听到: 'I'm sorry I'm late.' 请快速应答。",
+    "expected_answer": "That's OK. / No problem. / It doesn't matter.",
+    "topic": "social",
+    "cefr": "A1",
+    "year": "2025一模",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "qr_ermo2025_01",
+    "type": "quick_response",
+    "section": "speaking",
+    "title": "2025二模 快速应答 - 问候",
+    "prompt": "听到: 'How do you do?' 请快速应答。",
+    "expected_answer": "How do you do? / Nice to meet you.",
+    "topic": "social",
+    "cefr": "A1",
+    "year": "2025二模",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  }
+]

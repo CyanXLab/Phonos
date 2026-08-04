@@ -78,6 +78,12 @@ export const shanghaiExamApi = {
 export const llmApi = {
   health: () => api.get("/llm/health"),
   score: (data: any) => api.post("/llm/score", data),
+  diagnoseReading: (data: any) => api.post("/llm/diagnose-reading", data),
+  analyzeDictation: (data: any) => api.post("/llm/analyze-dictation", data),
+  diagnoseLearning: (data: any) => api.post("/llm/diagnose-learning", data),
+  explainTask: (data: any) => api.post("/llm/explain-task", data),
+  chat: (message: string, context?: any) =>
+    api.post("/llm/chat", { message, context }),
 };
 
 export const modelsApi = {

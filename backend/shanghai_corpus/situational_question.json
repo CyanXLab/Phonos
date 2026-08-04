@@ -1,0 +1,58 @@
+[
+  {
+    "id": "sq_2025_chun_01",
+    "type": "situational_question",
+    "section": "speaking",
+    "title": "2025春考 情景提问 - 周末计划",
+    "prompt": "情景：你想知道朋友周末的计划。请用英语提问。",
+    "expected_answer": "What are you going to do this weekend? / Do you have any plans for the weekend?",
+    "keywords": ["weekend", "plan", "do"],
+    "topic": "daily_life",
+    "cefr": "A2",
+    "year": "2025春考",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "sq_2026_qiu_01",
+    "type": "situational_question",
+    "section": "speaking",
+    "title": "2026秋考 情景提问 - 图书馆开放时间",
+    "prompt": "情景：你想询问图书馆的开放时间。请用英语提问。",
+    "expected_answer": "What time does the library open? / When is the library open?",
+    "keywords": ["library", "open", "time"],
+    "topic": "school_life",
+    "cefr": "A2",
+    "year": "2026秋考",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "sq_yimo2025_01",
+    "type": "situational_question",
+    "section": "speaking",
+    "title": "2025一模 情景提问 - 餐厅推荐",
+    "prompt": "情景：你在餐厅想请服务员推荐菜品。请用英语提问。",
+    "expected_answer": "Could you recommend a dish? / What do you recommend?",
+    "keywords": ["recommend", "dish", "what"],
+    "topic": "food",
+    "cefr": "A2",
+    "year": "2025一模",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "sq_ermo2025_01",
+    "type": "situational_question",
+    "section": "speaking",
+    "title": "2025二模 情景提问 - 火车站问路",
+    "prompt": "情景：你想知道去火车站怎么走。请用英语提问。",
+    "expected_answer": "How can I get to the train station? / Could you tell me the way to the train station?",
+    "keywords": ["train station", "way", "how"],
+    "topic": "transport",
+    "cefr": "A2",
+    "year": "2025二模",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  }
+]

@@ -179,6 +179,8 @@ class Settings(BaseSettings):
     # llama.cpp 本地可选
     llama_cpp_url: str = Field(default="http://127.0.0.1:8080/v1", description="本地 llama.cpp server URL")
     llm_enabled: bool = Field(default=True, description="是否启用 LLM 评分")
+    # API 调用延迟（防限速，秒）
+    llm_api_delay: float = Field(default=1.5, description="LLM API 调用间隔（防限速）")
 
     # ---------- 健康检查 ----------
     health_check_db: bool = True

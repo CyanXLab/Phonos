@@ -200,17 +200,81 @@ class ExamReport:
 
 
 # ============================================================
-# 真题语料库（基于 2024-2026 上海高考听说卷考生回忆 + 官方模拟）
+# 真题语料库（从 JSON 文件加载，支持一模/二模/春考/秋考）
 # ============================================================
 def _build_corpus() -> List[ExamTask]:
-    """构建上海高考听说语料库。
+    """从 shanghai_corpus/*.json 加载语料。
 
     数据来源：
-    - 2026 秋考考生回忆（知乎/B站）
-    - 2025 春考官方模拟（B站视频说明）
-    - 训练用题目（按真实题型结构）
+    - 2025/2026 春考、秋考考生回忆
+    - 2025 一模、二模
+    - 训练题
     """
+    import json
+    from pathlib import Path
+
+    corpus_dir = Path(__file__).resolve().parents[2] / "shanghai_corpus"
     tasks: List[ExamTask] = []
+
+    if not corpus_dir.is_dir():
+        # 回退：使用内置示例
+        return _build_fallback_corpus()
+
+    # 按题型映射
+    type_mapping = {
+        "listening_short": TaskType.LISTENING_SHORT,
+        "listening_long": TaskType.LISTENING_LONG,
+        "read_sentence": TaskType.READ_SENTENCE,
+        "read_passage": TaskType.READ_PASSAGE,
+        "situational_question": TaskType.SITUATIONAL_QUESTION,
+        "picture_description": TaskType.PICTURE_DESCRIPTION,
+        "quick_response": TaskType.QUICK_RESPONSE,
+        "retell_and_answer": TaskType.RETELL_AND_ANSWER,
+    }
+
+    for json_file in corpus_dir.glob("*.json"):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                continue
+            for item in data:
+                task_type_str = item.get("type", "")
+                if task_type_str not in type_mapping:
+                    continue
+                task_type = type_mapping[task_type_str]
+                section = "listening" if "listening" in task_type_str else "speaking"
+                timing = TASK_TIMING.get(task_type, {"prep": 15, "response": 30})
+
+                task = ExamTask(
+                    id=item.get("id", ""),
+                    type=task_type,
+                    section=section,
+                    title=item.get("title", ""),
+                    prompt=item.get("prompt", ""),
+                    audio_url=item.get("audio_url"),
+                    image_urls=item.get("image_urls"),
+                    expected_answer=item.get("expected_answer"),
+                    keywords=item.get("keywords"),
+                    options=item.get("options"),
+                    correct_option=item.get("correct_option"),
+                    timing=timing,
+                    difficulty=item.get("difficulty", "medium"),
+                    topic=item.get("topic", ""),
+                    cefr=item.get("cefr", ""),
+                    year=item.get("year", ""),
+                    source=item.get("source", ""),
+                )
+                tasks.append(task)
+        except Exception as e:
+            from ..core.logging import get_logger
+            get_logger("shanghai_exam").warning("corpus_load_failed", file=str(json_file), error=str(e))
+
+    return tasks
+
+
+def _build_fallback_corpus() -> List[ExamTask]:
+    """回退语料（当 JSON 文件不存在时）。"""
 
     # ========== 听力部分 ==========
 
@@ -502,6 +566,30 @@ class ShanghaiExamService:
         if year:
             tasks = [t for t in tasks if year in t.year]
         return [t.to_dict() for t in tasks[:limit]]
+
+    def list_years(self) -> List[str]:
+        """列出所有年份/套卷标签。"""
+        years = set()
+        for t in self._corpus:
+            if t.year:
+                years.add(t.year)
+        return sorted(years)
+
+    def create_exam_by_year(self, user_id: str, year: str, mode: ExamMode = ExamMode.EXAM) -> ExamSession:
+        """按年份/套卷创建考试（如 "2025一模"、"2026秋考"）。"""
+        import uuid
+        tasks = [t for t in self._corpus if year in t.year]
+        if not tasks:
+            tasks = self._corpus[:5]
+        session = ExamSession(
+            id=uuid.uuid4().hex[:16],
+            user_id=user_id,
+            mode=mode,
+            tasks=tasks,
+            started_at=time.time(),
+        )
+        self._sessions[session.id] = session
+        return session
 
     def get_task(self, task_id: str) -> Optional[dict]:
         for t in self._corpus:

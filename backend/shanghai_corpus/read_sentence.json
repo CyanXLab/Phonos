@@ -1,0 +1,54 @@
+[
+  {
+    "id": "rs_2025_chun_01",
+    "type": "read_sentence",
+    "section": "speaking",
+    "title": "2025春考 朗读句子 - 天气",
+    "prompt": "Please read the following sentence aloud.",
+    "expected_answer": "The weather is beautiful today, so I decide to go for a walk in the park.",
+    "topic": "daily_life",
+    "cefr": "A2",
+    "year": "2025春考",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  },
+  {
+    "id": "rs_2026_qiu_01",
+    "type": "read_sentence",
+    "section": "speaking",
+    "title": "2026秋考 朗读句子 - 科技",
+    "prompt": "Please read the following sentence aloud.",
+    "expected_answer": "Technology has greatly changed the way we communicate with each other.",
+    "topic": "technology",
+    "cefr": "B1",
+    "year": "2026秋考",
+    "source": "candidate_recall",
+    "difficulty": "medium"
+  },
+  {
+    "id": "rs_yimo2025_01",
+    "type": "read_sentence",
+    "section": "speaking",
+    "title": "2025一模 朗读句子 - 教育",
+    "prompt": "Please read the following sentence aloud.",
+    "expected_answer": "Reading extensively is one of the most effective ways to expand your vocabulary.",
+    "topic": "education",
+    "cefr": "B1",
+    "year": "2025一模",
+    "source": "candidate_recall",
+    "difficulty": "medium"
+  },
+  {
+    "id": "rs_ermo2025_01",
+    "type": "read_sentence",
+    "section": "speaking",
+    "title": "2025二模 朗读句子 - 环境",
+    "prompt": "Please read the following sentence aloud.",
+    "expected_answer": "Everyone should take responsibility for protecting our environment.",
+    "topic": "environment",
+    "cefr": "A2",
+    "year": "2025二模",
+    "source": "candidate_recall",
+    "difficulty": "easy"
+  }
+]

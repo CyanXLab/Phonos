@@ -104,6 +104,14 @@ CONFIG_CATEGORIES = {
         "description": "日志级别与格式",
         "fields": ["log_level", "log_format"],
     },
+    "llm": {
+        "label": "LLM 评分",
+        "description": "ModelScope/llama.cpp 大模型评分配置",
+        "fields": [
+            "llm_enabled", "llm_model", "llm_api_delay",
+            "llama_cpp_url",
+        ],
+    },
 }
 
 

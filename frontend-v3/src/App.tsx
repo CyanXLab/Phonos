@@ -7,6 +7,8 @@ import { ShanghaiExamPage } from "./pages/ShanghaiExamPage";
 import { StatsPage } from "./pages/StatsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { LoginPage } from "./pages/LoginPage";
+import { AIAssistantPage } from "./pages/AIAssistantPage";
+import { DiagnosisPage } from "./pages/DiagnosisPage";
 
 function App() {
   const { user, token } = useAuthStore();
@@ -19,11 +21,13 @@ function App() {
             <span className="text-xl">Phonos</span>
             <span className="text-xs text-gray-500">v3</span>
           </Link>
-          <nav className="flex-1 flex items-center gap-1 text-sm">
+          <nav className="flex-1 flex items-center gap-1 text-sm overflow-x-auto">
             <NavItem to="/">首页</NavItem>
             <NavItem to="/practice">练习</NavItem>
             <NavItem to="/dictation">听写</NavItem>
             <NavItem to="/shanghai-exam">上海听说</NavItem>
+            <NavItem to="/diagnosis">AI 诊断</NavItem>
+            <NavItem to="/assistant">AI 助手</NavItem>
             <NavItem to="/stats">统计</NavItem>
             <NavItem to="/settings">设置</NavItem>
           </nav>
@@ -43,6 +47,8 @@ function App() {
           <Route path="/practice" element={<PracticePage />} />
           <Route path="/dictation" element={<DictationPage />} />
           <Route path="/shanghai-exam" element={<ShanghaiExamPage />} />
+          <Route path="/diagnosis" element={<DiagnosisPage />} />
+          <Route path="/assistant" element={<AIAssistantPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/login" element={<LoginPage />} />

@@ -1,0 +1,41 @@
+[
+  {
+    "id": "rp_2025_chun_01",
+    "type": "read_passage",
+    "section": "speaking",
+    "title": "2025春考 朗读短文 - 教育",
+    "prompt": "Please read the following passage aloud.",
+    "expected_answer": "Education is not merely about acquiring knowledge but about developing the capacity to think independently. The most effective way to improve your pronunciation is through consistent practice and active listening.",
+    "topic": "education",
+    "cefr": "B1",
+    "year": "2025春考",
+    "source": "candidate_recall",
+    "difficulty": "medium"
+  },
+  {
+    "id": "rp_2026_qiu_01",
+    "type": "read_passage",
+    "section": "speaking",
+    "title": "2026秋考 朗读短文 - 自然",
+    "prompt": "Please read the following passage aloud.",
+    "expected_answer": "Even in bitter cold, trees never cease growing easily. They stand tall against the harsh winter winds, their roots reaching deep into the frozen earth, drawing strength from within. A basketball team works together in the same way that a machine operates, each part essential to the whole.",
+    "topic": "nature",
+    "cefr": "B2",
+    "year": "2026秋考",
+    "source": "candidate_recall",
+    "difficulty": "hard"
+  },
+  {
+    "id": "rp_yimo2025_01",
+    "type": "read_passage",
+    "section": "speaking",
+    "title": "2025一模 朗读短文 - 城市生活",
+    "prompt": "Please read the following passage aloud.",
+    "expected_answer": "Living in a big city offers many advantages, such as convenient transportation, diverse cultural activities, and numerous job opportunities. However, it also brings challenges like noise pollution, traffic congestion, and high living costs.",
+    "topic": "city_life",
+    "cefr": "B1",
+    "year": "2025一模",
+    "source": "candidate_recall",
+    "difficulty": "medium"
+  }
+]
